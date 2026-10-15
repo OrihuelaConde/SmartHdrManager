@@ -6,6 +6,8 @@ Turns Windows HDR on automatically when you need it – HDR games, HDR videos on
 > Not tested yet: AMD and Intel graphics, Windows 10 / Windows 11 23H2 and older, several HDR monitors, laptops.
 > If something does not work on your PC, please report it (see *Reporting a problem*).
 
+   ☕ **Like the app?** You can support development on [Ko-fi](https://ko-fi.com/vantacode420).
+
 ---
 
 ## Download – which file?
