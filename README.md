@@ -2,6 +2,8 @@
 
 Turns Windows HDR on automatically when you need it – HDR games, HDR videos on YouTube, local HDR movies and (optionally) SDR videos with NVIDIA RTX Video HDR – and back to SDR when you are done. It lives in the system tray.
 
+   ![Smart HDR Manager main window](docs/main.png)
+
 > **Beta.** Tested on Windows 11 24H2 with an NVIDIA GeForce RTX 5070 Ti and one HDR monitor (ASUS PG32UCDM).
 > Not tested yet: AMD and Intel graphics, Windows 10 / Windows 11 23H2 and older, several HDR monitors, laptops.
 > If something does not work on your PC, please report it (see *Reporting a problem*).
@@ -55,6 +57,8 @@ SmartHdrManager.exe --auto           back to automatic switching
 SmartHdrManager.exe --toggle-pause   pause / resume automation
 SmartHdrManager.exe --tray           start hidden in the tray
 ```
+
+![Settings](docs/settings.png)
 
 ## RTX Video HDR (NVIDIA RTX graphics cards)
 
