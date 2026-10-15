@@ -5,7 +5,7 @@ Turns Windows HDR on automatically when you need it – HDR games, HDR videos on
    ![Smart HDR Manager main window](docs/main.png)
 
 > **Beta.** Tested on Windows 11 24H2 with an NVIDIA GeForce RTX 5070 Ti and one HDR monitor (ASUS PG32UCDM).
-> Not tested yet: AMD and Intel graphics, Windows 10 / Windows 11 23H2 and older, several HDR monitors, laptops.
+> Not tested yet: AMD and Intel graphics, Windows on ARM (Snapdragon), Windows 10 / Windows 11 23H2 and older, several HDR monitors, laptops.
 > If something does not work on your PC, please report it (see *Reporting a problem*).
 
    ☕ **Like the app?** You can support development on [Ko-fi](https://ko-fi.com/vantacode420).
@@ -18,6 +18,10 @@ Turns Windows HDR on automatically when you need it – HDR games, HDR videos on
 |---|---|---|
 | `SmartHdrManager-v…-win-x64-standalone.zip` | large | **You are not sure.** Runs on any 64-bit Windows 10/11, nothing else to install. |
 | `SmartHdrManager-v…-win-x64.zip` | small | You already have the **.NET 10 Desktop Runtime** installed ([download](https://dotnet.microsoft.com/download/dotnet/10.0) → ".NET Desktop Runtime", x64). |
+| `SmartHdrManager-v…-win-arm64-standalone.zip` | large | *Experimental, untested.* Windows on ARM (e.g. Snapdragon X laptops), nothing else to install. |
+| `SmartHdrManager-v…-win-arm64.zip` | small | *Experimental, untested.* Windows on ARM with the .NET 10 Desktop Runtime **Arm64** installed. |
+
+Not sure if your PC is ARM? *Settings › System › About › System type* says "ARM-based processor" on ARM PCs – everyone else takes x64.
 
 Requirements: Windows 10 or 11 (64-bit) and an HDR-capable monitor with HDR available in *Windows Settings › Display*.
 
