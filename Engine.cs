@@ -1,0 +1,1899 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace SmartHdrManager
+{
+    public enum HdrOverride { None, ForceHdr, ForceSdr }
+
+    public sealed class EngineStatus
+    {
+        public bool HdrOn { get; init; }
+        public bool Paused { get; init; }
+        public string ActiveProcess { get; init; } = string.Empty;
+        public bool IsFullscreen { get; init; }
+        public string? RunningGame { get; init; }
+        public HdrOverride Override { get; init; }
+        public long OverrideRemainingMs { get; init; } = -1;   // -1 = until turned back
+        public string? WaitingForGame { get; init; }            // per-game start delay in progress
+        public int WaitingSecondsLeft { get; init; }
+        public int HoldSecondsLeft { get; init; }               // minimum HDR time / keep-after-exit in progress
+        public string? Video { get; init; }                     // video that holds HDR right now (video automation)
+    }
+
+    /// <summary>One row of the Games tab: a library game (several processes possible) or a single program.</summary>
+    public sealed class GameRow
+    {
+        public string Key { get; init; } = string.Empty;
+        public string Name { get; init; } = string.Empty;
+        public string Subtitle { get; init; } = string.Empty;
+        public List<string> Processes { get; init; } = new();
+        public string? ExePath { get; init; }
+        public bool Hdr { get; init; }
+        public bool HasOptions { get; init; }
+    }
+
+    /// <summary>
+    /// The HDR/SDR decision loop. Runs on its own background thread and owns every display switch.
+    /// The UI only changes the configuration (under <see cref="Sync"/>) or posts work with <see cref="Post"/>.
+    ///
+    /// Cost per tick (default every 100 ms): one foreground-window lookup with a cached process name.
+    /// The process list is scanned once per second and the display HDR state is read every 2 seconds,
+    /// or immediately after a switch, a display change or resume from sleep.
+    /// </summary>
+    public sealed class HdrEngine
+    {
+        /// <summary>Old location (next to the exe). Not writable when the app is installed in "Program Files".</summary>
+        public static readonly string LegacyConfigPath = Path.Combine(AppContext.BaseDirectory, "config.json");
+
+        /// <summary>
+        /// Portable mode: a file named "portable.txt" next to the exe keeps the settings next to the exe
+        /// (e.g. for a USB stick). Otherwise settings live in %AppData%\SmartHdrManager\config.json.
+        /// </summary>
+        public static readonly bool IsPortable = File.Exists(Path.Combine(AppContext.BaseDirectory, "portable.txt"));
+
+        public static readonly string ConfigPath = IsPortable
+            ? LegacyConfigPath
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SmartHdrManager", "config.json");
+        public static readonly string LogPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SmartHdrManager", "log.txt");
+
+        private const int ProcessScanIntervalMs = 1000;   // how often running processes are checked for HDR games
+        private const int HdrRequeryIntervalMs = 2000;    // how often the real HDR state is re-read from Windows
+        private const int SwitchSpacingMs = 1500;         // minimum time between two automatic switch attempts
+        private const int FailuresBeforeCooldown = 3;
+        private const int FailureCooldownMs = 30000;      // stop retrying for 30 s after repeated failures
+        private const int StartupScanDelayMs = 20000;     // let Windows finish logging in before scanning drives
+        private static readonly TimeSpan StartupScanInterval = TimeSpan.FromDays(7);   // automatic scan at most weekly
+        private const int AutoScanRecheckMs = 60000;      // automatic scan waits while a game / full-screen app runs
+
+        private static readonly object FileLogLock = new();
+        private static readonly StringComparer Cmp = StringComparer.OrdinalIgnoreCase;
+
+        public AppConfig Config { get; private set; }
+        public object Sync { get; } = new();
+        public volatile bool Paused;
+        public EngineStatus Status { get; private set; } = new();
+
+        /// <summary>True while hotkeys must be polled (only if RegisterHotKey failed).</summary>
+        public volatile bool PollHotkeys = true;          // the H / I shortcuts
+        public volatile bool PollOverrideHotkey = true;   // the override shortcut
+
+        private Thread? _thread;
+        private volatile bool _stop;
+        private readonly AutoResetEvent _wake = new(false);
+        private readonly ConcurrentQueue<Action> _posted = new();
+        private int _scanning;
+
+        // ---- precomputed lookup sets, rebuilt only when the configuration changes ----
+        private sealed class Snapshot
+        {
+            public readonly HashSet<string> HdrGames;
+            public readonly HashSet<string> Ignored;
+            public readonly HashSet<string> ForceSdr;
+            public readonly HashSet<string> Browsers;
+            public readonly HashSet<string> LocalPlayers;
+            public readonly string[] VideoKeywords;
+            public readonly string BrowserToken;
+            public readonly bool EnableOnProcessStart, BrowserWindowed, RequireKeyword, ReloadProfile, KeepBrowserHdr, RefreshApps;
+            public readonly int FallbackSeconds, TickMs;
+            public readonly long MinimumHdrMs;
+            public readonly MonitorFilter Monitors;
+            public readonly string HotkeyMode;
+            public readonly Dictionary<string, GameOptions> GameOptions;
+            // video playback (RTX Video HDR)
+            public readonly bool VideoAuto, VideoBrowsers, VideoPlayers, VideoFullscreenOnly, VideoBattery;
+            public readonly string VideoMode, SdrToken;
+            public readonly long VideoActivationMs, VideoRevertMs;
+            public readonly HashSet<string> VideoBlockers;
+
+            public Snapshot(AppConfig c)
+            {
+                // "?? empty" guards: a list set to null in config.json must not crash every tick
+                HdrGames = new HashSet<string>(c.HdrGamesAndApps ?? new List<string>(), Cmp);
+                Ignored = new HashSet<string>(c.IgnoredGames ?? new List<string>(), Cmp);
+                ForceSdr = new HashSet<string>(c.ForceSdrApps ?? new List<string>(), Cmp);
+                Browsers = new HashSet<string>(c.Browsers ?? new List<string>(), Cmp);
+                LocalPlayers = new HashSet<string>(c.LocalVideoPlayers ?? new List<string>(), Cmp);
+                VideoKeywords = (c.HdrVideoKeywords ?? new List<string>()).Where(k => !string.IsNullOrWhiteSpace(k)).ToArray();
+                BrowserToken = string.IsNullOrWhiteSpace(c.BrowserRealHdrToken) ? string.Empty : c.BrowserRealHdrToken;
+                Monitors = new MonitorFilter(c.OnlyPrimaryMonitor, c.SelectedMonitors);
+                HotkeyMode = HotkeySettings.Normalize(c.HotkeyModifier);
+                MinimumHdrMs = Math.Clamp(c.MinimumHdrSeconds, 0, 3600) * 1000L;
+                GameOptions = new Dictionary<string, GameOptions>(c.PerGameOptions ?? new Dictionary<string, GameOptions>(), Cmp);
+                EnableOnProcessStart = c.EnableHdrOnProcessStart;
+                BrowserWindowed = c.EnableHdrForBrowserInWindowedMode;
+                RequireKeyword = c.RequireKeywordForFullscreenVideo;
+                ReloadProfile = c.ReloadColorProfileAfterSdr;
+                KeepBrowserHdr = c.KeepBrowserHdrWhenNotFocused;
+                RefreshApps = c.RefreshAppsAfterSdr;
+                FallbackSeconds = Math.Max(0, c.SdrFallbackDelaySeconds);
+                TickMs = Math.Clamp(c.ProcessScanIntervalMs, 50, 1000);
+                VideoAuto = c.VideoHdrAutomation && (c.VideoHdrInBrowsers || c.VideoHdrInPlayers);
+                VideoBrowsers = c.VideoHdrInBrowsers;
+                VideoPlayers = c.VideoHdrInPlayers;
+                VideoFullscreenOnly = VideoTriggers.Normalize(c.VideoHdrTrigger) == VideoTriggers.Fullscreen;
+                VideoBattery = c.VideoHdrDisableOnBattery;
+                VideoMode = VideoHdrModes.Normalize(c.VideoHdrMode);
+                SdrToken = string.IsNullOrWhiteSpace(c.BrowserSdrVideoToken) ? string.Empty : c.BrowserSdrVideoToken;
+                VideoActivationMs = Math.Clamp(c.VideoHdrActivationSeconds, 0, 30) * 1000L;
+                VideoRevertMs = Math.Clamp(c.VideoHdrRevertSeconds, 0, 30) * 1000L;
+                VideoBlockers = new HashSet<string>((c.VideoHdrBlockingApps ?? new List<string>()).Where(n => !string.IsNullOrWhiteSpace(n)), Cmp);
+            }
+        }
+
+        private volatile Snapshot? _snapshot;
+        private Snapshot? _lastSnapshot;
+
+        // ---- decision state (engine thread only) ----
+        private bool _hdrAny, _hdrAll;
+        private bool _verifyAllOn;   // after a "successful" ON: confirm on the next re-read that every display really is on
+        private long _nextHdrQueryMs;
+        private int _forceHdrQuery = 1;
+        private MonitorFilter? _queriedMonitors;
+        private long _hdrOnSinceMs;            // when HDR was last switched/seen on (0 = off)
+        private bool _firstHdrQueryDone;
+        private bool _apiLogged;
+
+        // manual override (written from any thread, read by the engine thread)
+        private volatile int _overrideMode;    // (int)HdrOverride
+        private long _overrideUntilMs;         // 0 = until turned back
+        private readonly object _overrideLock = new();
+        private int _overrideChanged;          // 1 = engine thread must reset its timers (set by any thread)
+
+        // per-game options
+        private string? _delayGame;
+        private long _delaySinceMs;
+        private long _holdHdrUntilMs;          // keep-after-exit
+        private string? _waitingGame;
+        private long _waitingMsLeft;
+        private long _holdMsLeft;
+
+        private string? _runningGame;
+        private long _nextProcessScanMs;
+        private string? _activeHdrGameProcess;
+        private string? _backgroundHdrBrowser;
+        private long _nextBackgroundCheckMs;
+
+        // ---- video playback (engine thread only) ----
+        private const int VideoCheckIntervalMs = 250;
+        private const int RtxRecheckMs = 60000;
+        private readonly VideoPlaybackMonitor _video = new();
+        private long _nextVideoCheckMs;
+        private VideoCandidate? _videoCandidate;     // latest raw detection (already checked against the monitor rules)
+        private string? _pendingVideoKey;            // activation delay
+        private long _pendingSinceMs;
+        private bool _videoActive;                   // a video holds HDR (incl. the revert delay)
+        private string? _activeVideoKey;
+        private string _activeVideoText = string.Empty;
+        private bool _activeVideoNudge;              // SDR video in a browser: nudge it after HDR is on (RTX Video HDR starts sooner)
+        private MonitorFilter? _activeVideoTarget;
+        private long _videoLostAtMs = -1;
+        private bool _videoEnded;                    // switch back to SDR right away (the revert delay already ran)
+        private string _videoEndedWhat = string.Empty;
+        private string? _videoBlockLogged;
+        private string? _runningVideoBlocker;        // e.g. obs64 (process scan)
+        private IntPtr _checkedHwnd, _checkedMonitor;
+        private MonitorFilter? _checkedAllowed, _checkedTarget;
+        private string? _lastVideoProblem;
+        private int _displaysChanged;
+        private bool _onBattery;
+        private long _nextBatteryCheckMs;
+        private RtxVideoStatus? _rtx;
+        private long _nextRtxCheckMs;
+        private readonly Dictionary<string, MonitorFilter> _videoFilters = new(StringComparer.OrdinalIgnoreCase);
+
+        // Monitors that are switched right now: a single monitor while a video holds HDR, otherwise the Settings selection
+        private MonitorFilter? _videoTarget;
+        private MonitorFilter Target(Snapshot s) => _videoTarget ?? s.Monitors;
+
+        private List<DisplayColorState>? _sdrBaseline;   // colour state right before HDR was switched on
+
+        private long _sdrFallbackAtMs = -1;
+        private long _lastAttemptMs = long.MinValue / 2;
+        private long _cooldownUntilMs;
+        private int _consecutiveFailures;
+        private long _lastPolledHotkeyMs = long.MinValue / 2;
+
+        // ---- in-memory log ring buffer (Log tab) + file log ----
+        private readonly object _logLock = new();
+        private readonly List<string> _log = new();
+        private int _logBase;
+
+        public HdrEngine()
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
+                if (File.Exists(LogPath) && new FileInfo(LogPath).Length > 1_000_000)
+                    File.Delete(LogPath);
+            }
+            catch { }
+
+            MigrateLegacyConfig();
+            Config = LoadOrCreateConfig();
+            Save();
+        }
+
+        /// <summary>
+        /// One-time move of config.json from the exe folder (versions up to 2.3) to %AppData%\SmartHdrManager.
+        /// The old file is renamed to config.json.old so it is clear which file is used.
+        /// </summary>
+        private void MigrateLegacyConfig()
+        {
+            if (IsPortable || File.Exists(ConfigPath) || !File.Exists(LegacyConfigPath)) return;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
+                File.Copy(LegacyConfigPath, ConfigPath);
+                Log("CONFIG", $"Settings moved to {ConfigPath}.");
+                try { File.Move(LegacyConfigPath, LegacyConfigPath + ".old", overwrite: true); } catch { }   // read-only folder: keep it
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR", $"Old settings could not be moved ({ex.Message}).");
+            }
+        }
+
+        private static long Now => Environment.TickCount64;
+
+        // ------------------------------------------------------------------
+        // Lifecycle
+        // ------------------------------------------------------------------
+        public void Start()
+        {
+            Log("INFO", "Smart HDR Manager started – monitoring active.");
+
+            bool autoScan;
+            lock (Sync)
+            {
+                // Only if enabled and the last scan is more than a week ago (manual "Scan drives" still works any time)
+                autoScan = Config.AutoScanDrivesOnStartup &&
+                           (Config.LastDriveScanUtc == null || DateTime.UtcNow - Config.LastDriveScanUtc.Value > StartupScanInterval);
+            }
+            if (autoScan)
+            {
+                // Low priority and delayed, so the disk scan does not compete with Windows logon or a game launch
+                var scanThread = new Thread(() =>
+                {
+                    Thread.Sleep(StartupScanDelayMs);
+                    // Never scan the disks while a game or a full-screen app is running: wait until it is closed
+                    bool deferLogged = false;
+                    while (!_stop && IsGameOrFullscreenActive(out string what))
+                    {
+                        if (!deferLogged)
+                        {
+                            Log("SCAN", $"Automatic drive scan postponed – {what} is running. It starts once it is closed.");
+                            deferLogged = true;
+                        }
+                        for (int i = 0; i < AutoScanRecheckMs / 1000 && !_stop; i++) Thread.Sleep(1000);
+                    }
+                    if (!_stop) ScanDrives(automatic: true);
+                })
+                { IsBackground = true, Priority = ThreadPriority.BelowNormal, Name = "GameScan" };
+                scanThread.Start();
+            }
+
+            // Game library (Steam / Epic / GOG / Xbox): quick refresh in the background at every start
+            // (known games reuse their cached executables, so this mostly reads small manifest files)
+            var libraryThread = new Thread(() =>
+            {
+                Thread.Sleep(3000);
+                if (!_stop) RefreshLibrary(fullRescan: false);
+            })
+            { IsBackground = true, Priority = ThreadPriority.BelowNormal, Name = "GameLibrary" };
+            libraryThread.Start();
+
+            _thread = new Thread(Run) { IsBackground = true, Name = "HdrEngine" };
+            _thread.Start();
+        }
+
+        /// <summary>Raised (on a background thread) after the game library was refreshed.</summary>
+        public event EventHandler? LibraryChanged;
+
+        private readonly object _libraryLock = new();
+
+        public void RefreshLibrary(bool fullRescan)
+        {
+            lock (_libraryLock)   // startup refresh, startup scan and the Scan button never run at the same time
+            try
+            {
+                Dictionary<string, LibraryGame>? previous = null;
+                if (!fullRescan)
+                {
+                    lock (Sync)
+                        previous = (Config.LibraryGames ?? new List<LibraryGame>())
+                            .GroupBy(g => g.Id, Cmp).ToDictionary(g => g.Key, g => g.First(), Cmp);
+                }
+
+                var games = GameLibraryScanner.Scan(previous, msg => Log("SCAN", msg));
+                var knownPaths = GameLibraryScanner.FindKnownExePaths();
+                int iconsFound = 0;
+                lock (Sync)
+                {
+                    Config.LibraryGames = games;
+
+                    // Icons for programs outside the libraries (and library games without an exe path):
+                    // take exe locations Windows already knows (Game Bar list, program caches, installed apps)
+                    var wanted = Config.HdrGamesAndApps
+                        .Concat(Config.DiscoveredGames)
+                        .Concat(games.Where(g => g.ExePath == null).SelectMany(g => g.Processes))
+                        .Distinct(Cmp);
+                    foreach (string proc in wanted)
+                    {
+                        bool known = Config.ProgramPaths.TryGetValue(proc, out var current) && File.Exists(current);
+                        if (!known && knownPaths.TryGetValue(proc, out var found))
+                        {
+                            Config.ProgramPaths[proc] = found;
+                            iconsFound++;
+                        }
+                    }
+                    Save();
+                }
+                if (iconsFound > 0) Log("SCAN", $"Program locations found for {iconsFound} program(s) (icons).");
+                Log("SCAN", $"Game library: {games.Count} games found (Steam, Epic, GOG, Xbox).");
+                LibraryChanged?.Invoke(this, EventArgs.Empty);
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR", $"Game library could not be read: {ex.Message}");
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Manual override (tray menu / the override shortcut)
+        // ------------------------------------------------------------------
+        public HdrOverride OverrideMode => (HdrOverride)_overrideMode;
+
+        /// <summary>Force HDR on/off. duration null = until turned back. HdrOverride.None = back to automatic.</summary>
+        public void SetOverride(HdrOverride mode, TimeSpan? duration)
+        {
+            long until = mode != HdrOverride.None && duration.HasValue ? Now + (long)duration.Value.TotalMilliseconds : 0;
+            lock (_overrideLock)
+            {
+                Interlocked.Exchange(ref _overrideUntilMs, until);
+                _overrideMode = (int)mode;
+            }
+            Interlocked.Exchange(ref _overrideChanged, 1);
+
+            string length = duration.HasValue ? $"for {FormatDuration(duration.Value)}" : "until turned back";
+            Log("MANUAL", mode switch
+            {
+                HdrOverride.ForceHdr => $"HDR forced ON {length}.",
+                HdrOverride.ForceSdr => $"HDR forced OFF (SDR) {length}.",
+                _ => "Back to automatic HDR switching."
+            });
+            _wake.Set();
+        }
+
+        /// <summary>the override shortcut: automatic -> HDR on -> SDR -> automatic. Returns the new mode.</summary>
+        public HdrOverride CycleOverride()
+        {
+            var next = OverrideMode switch
+            {
+                HdrOverride.None => HdrOverride.ForceHdr,
+                HdrOverride.ForceHdr => HdrOverride.ForceSdr,
+                _ => HdrOverride.None
+            };
+            SetOverride(next, null);
+            return next;
+        }
+
+        private static string FormatDuration(TimeSpan t) =>
+            t.TotalHours >= 1 ? $"{t.TotalHours:0.#} hour{(t.TotalHours >= 2 ? "s" : "")}" : $"{t.TotalMinutes:0} minutes";
+
+        public List<MonitorInfo> GetMonitors() => HdrController.ListMonitors();
+
+        public void Stop()
+        {
+            _stop = true;
+            _wake.Set();
+            try { _thread?.Join(2000); } catch { }
+            lock (Sync) Save();
+        }
+
+        /// <summary>Runs an action on the engine thread (used for hotkeys, so all display switching stays on one thread).</summary>
+        public void Post(Action action)
+        {
+            _posted.Enqueue(action);
+            _wake.Set();
+        }
+
+        /// <summary>Forces the HDR state to be re-read on the next tick (display change, resume from sleep).</summary>
+        public void InvalidateHdrState()
+        {
+            Interlocked.Exchange(ref _forceHdrQuery, 1);
+            Interlocked.Exchange(ref _displaysChanged, 1);   // video windows may now be on another display
+            _wake.Set();
+        }
+
+        public void HotkeyAddCurrent() => Post(() =>
+        {
+            var (p, _, _) = WindowDetector.GetActiveWindowState();
+            AddGame(p, fromHotkey: true, WindowDetector.GetForegroundExePath());
+        });
+
+        public void HotkeyIgnoreCurrent() => Post(() =>
+        {
+            var (p, _, _) = WindowDetector.GetActiveWindowState();
+            IgnoreGame(p, fromHotkey: true);
+        });
+
+        private void Run()
+        {
+            while (!_stop)
+            {
+                int waitMs = 100;
+                try
+                {
+                    while (_posted.TryDequeue(out var action))
+                    {
+                        try { action(); }
+                        catch (Exception ex) { Log("ERROR", $"Action failed: {ex.Message}"); }
+                    }
+
+                    var s = GetSnapshot();
+                    waitMs = s.TickMs;
+                    Tick(s);
+                }
+                catch (Exception ex)
+                {
+                    Log("ERROR", $"Engine error: {ex.Message}");
+                    waitMs = 1000;
+                }
+
+                _wake.WaitOne(waitMs);   // returns early when work is posted or the display changes
+            }
+        }
+
+        private Snapshot GetSnapshot()
+        {
+            var s = _snapshot;
+            if (s != null) return s;
+            lock (Sync)
+            {
+                s = _snapshot ??= new Snapshot(Config);
+                return s;
+            }
+        }
+
+        /// <summary>Call after every configuration change (while holding <see cref="Sync"/>).</summary>
+        private void InvalidateSnapshot()
+        {
+            _snapshot = null;
+            _wake.Set();
+        }
+
+        // ------------------------------------------------------------------
+        // One monitoring tick
+        // ------------------------------------------------------------------
+        private void Tick(Snapshot s)
+        {
+            long now = Now;
+
+            // Configuration changed: re-check running games right away
+            if (!ReferenceEquals(s, _lastSnapshot))
+            {
+                _lastSnapshot = s;
+                _nextProcessScanMs = 0;
+            }
+
+            if ((PollHotkeys || PollOverrideHotkey) && s.HotkeyMode != HotkeySettings.Off) PollHotkeysFallback(now, s.HotkeyMode);
+
+            var (procName, title, isFullscreen) = WindowDetector.GetActiveWindowState();
+
+            RefreshHdrState(s, now);
+
+            if (now >= _nextProcessScanMs)
+            {
+                _runningGame = FindRunningHdrGame(s, out string? runningPath, out _runningVideoBlocker);
+                _nextProcessScanMs = now + ProcessScanIntervalMs;
+                if (_runningGame != null && runningPath != null) RememberProgramPath(_runningGame, runningPath);
+            }
+
+            // Manual override has priority over everything (also over "pause")
+            HdrOverride mode;
+            long until;
+            bool expired = false;
+            lock (_overrideLock)
+            {
+                mode = (HdrOverride)_overrideMode;
+                until = Interlocked.Read(ref _overrideUntilMs);
+                if (mode != HdrOverride.None && until > 0 && now >= until)
+                {
+                    // expire only this exact override (a new one chosen meanwhile is not touched: same lock)
+                    _overrideMode = (int)HdrOverride.None;
+                    Interlocked.Exchange(ref _overrideUntilMs, 0);
+                    mode = HdrOverride.None;
+                    until = 0;
+                    expired = true;
+                }
+            }
+            if (expired)
+            {
+                Log("MANUAL", "Override time is up – back to automatic HDR switching.");
+                Interlocked.Exchange(ref _overrideChanged, 1);
+            }
+
+            // After any override change, start the automatic logic fresh (no stale timers or "game closed" events)
+            if (Interlocked.Exchange(ref _overrideChanged, 0) == 1)
+            {
+                _sdrFallbackAtMs = -1;
+                _holdHdrUntilMs = 0;
+                _activeHdrGameProcess = null;
+                _delayGame = null;
+            }
+
+            _waitingGame = null;
+            _holdMsLeft = 0;
+            if (mode == HdrOverride.None && !Paused)
+                Decide(s, now, procName, title, isFullscreen);
+            else if (mode != HdrOverride.None)
+                ApplyOverride(s, now, mode);
+
+            Status = new EngineStatus
+            {
+                HdrOn = _hdrAny,
+                Paused = Paused,
+                ActiveProcess = procName,
+                IsFullscreen = isFullscreen,
+                RunningGame = _runningGame,
+                Override = mode,
+                OverrideRemainingMs = mode != HdrOverride.None && until > 0 ? Math.Max(0, until - now) : -1,
+                WaitingForGame = _waitingGame,
+                WaitingSecondsLeft = (int)Math.Ceiling(_waitingMsLeft / 1000.0),
+                HoldSecondsLeft = (int)Math.Ceiling(_holdMsLeft / 1000.0),
+                Video = _videoActive ? _activeVideoText : null
+            };
+        }
+
+        private void ApplyOverride(Snapshot s, long now, HdrOverride mode)
+        {
+            bool canAttempt = now - _lastAttemptMs >= SwitchSpacingMs && now >= _cooldownUntilMs;
+            ResetVideo();   // a video must not take over again the moment the override ends
+            if (SyncTarget(s, now, null, mode == HdrOverride.ForceHdr, canAttempt)) return;
+            if (!canAttempt) return;
+
+            if (mode == HdrOverride.ForceHdr && !_hdrAll)
+                TurnHdrOn("Manual override", Target(s));
+            else if (mode == HdrOverride.ForceSdr && _hdrAny)
+                TurnHdrOff("Manual override", Target(s), s.ReloadProfile);
+        }
+
+        private void RefreshHdrState(Snapshot s, long now)
+        {
+            bool forced = Interlocked.Exchange(ref _forceHdrQuery, 0) == 1;
+            var target = Target(s);
+            if (!forced && now < _nextHdrQueryMs && ReferenceEquals(_queriedMonitors, target))
+                return;
+
+            // Keep the last known state if Windows could not be queried
+            if (HdrController.QueryHdrState(target, out bool any, out bool all))
+            {
+                if (!_apiLogged && HdrController.HdrApiName != "not determined yet")
+                {
+                    _apiLogged = true;
+                    Log("INFO", $"Display control: {HdrController.HdrApiName}.");
+                }
+                // e.g. switched on by hand (Win+Alt+B). At app start (first query) HDR counts as "on for long already".
+                if (any && !_hdrAny && _hdrOnSinceMs == 0) _hdrOnSinceMs = _firstHdrQueryDone ? now : 1;
+                _firstHdrQueryDone = true;
+                if (!any) _hdrOnSinceMs = 0;
+                _hdrAny = any;
+                _hdrAll = all;
+
+                // Windows reported success, but a display did not actually switch on: count it as a failure,
+                // so a monitor that refuses HDR cannot cause an endless retry loop (cooldown after 3 tries).
+                if (_verifyAllOn && !forced)
+                {
+                    _verifyAllOn = false;
+                    if (!all)
+                    {
+                        Log("ERROR", "HDR was switched on, but not every HDR-capable display reports HDR as active.");
+                        RegisterFailure(now);
+                    }
+                    else
+                    {
+                        _consecutiveFailures = 0;
+                    }
+                }
+            }
+            _queriedMonitors = target;
+            _nextHdrQueryMs = now + HdrRequeryIntervalMs;
+        }
+
+        private void PollHotkeysFallback(long now, string mode)
+        {
+            if (now - _lastPolledHotkeyMs < 2000) return;
+
+            if (PollHotkeys && WindowDetector.IsHotkeyPressed(mode, 0x48))          // H
+            {
+                _lastPolledHotkeyMs = now;
+                var (p, _, _) = WindowDetector.GetActiveWindowState();
+                AddGame(p, fromHotkey: true, WindowDetector.GetForegroundExePath());
+            }
+            else if (PollHotkeys && WindowDetector.IsHotkeyPressed(mode, 0x49))     // I
+            {
+                _lastPolledHotkeyMs = now;
+                var (p, _, _) = WindowDetector.GetActiveWindowState();
+                IgnoreGame(p, fromHotkey: true);
+            }
+            else if (PollOverrideHotkey && WindowDetector.IsHotkeyPressed(mode, 0x4F))   // O
+            {
+                _lastPolledHotkeyMs = now;
+                CycleOverride();
+            }
+        }
+
+        private void Decide(Snapshot s, long now, string procName, string title, bool isFullscreen)
+        {
+            bool shouldEnableHdr = EvaluateHdrRequirement(s, procName, title, isFullscreen, out string reason);
+
+            // Early detection when a selected HDR game process is running
+            if (!shouldEnableHdr && s.EnableOnProcessStart &&
+                !s.ForceSdr.Contains(procName) &&
+                _runningGame != null)
+            {
+                shouldEnableHdr = true;
+                reason = $"HDR game started/running ({_runningGame})";
+            }
+
+            // HDR is on and a browser window still shows the HDR token, but something else has focus
+            // (a browser pop-up/menu, another app, a second monitor): keep HDR on instead of flickering to SDR.
+            if (!shouldEnableHdr && _hdrAny && s.KeepBrowserHdr && s.BrowserToken.Length > 0 && !(s.VideoAuto && s.VideoBrowsers) &&
+                !s.ForceSdr.Contains(procName) && !s.Ignored.Contains(procName))
+            {
+                if (now >= _nextBackgroundCheckMs)
+                {
+                    _backgroundHdrBrowser = WindowDetector.FindBrowserWindowWithToken(s.Browsers, s.BrowserToken, requireFullscreen: !s.BrowserWindowed);
+                    _nextBackgroundCheckMs = now + 500;
+                }
+                if (_backgroundHdrBrowser != null)
+                {
+                    shouldEnableHdr = true;
+                    reason = $"YouTube HDR video still playing ({_backgroundHdrBrowser})";
+                }
+            }
+            else
+            {
+                _nextBackgroundCheckMs = 0;   // look again immediately the next time it is needed
+            }
+
+            // Per-game start delay: wait N seconds after the game appears before switching HDR on
+            string? hdrGame = s.HdrGames.Contains(procName) ? procName : _runningGame;
+            if (hdrGame == null)
+            {
+                _delayGame = null;
+            }
+            else if (shouldEnableHdr && !_hdrAny &&
+                     s.GameOptions.TryGetValue(hdrGame, out var startOptions) && startOptions.HdrDelaySeconds > 0)
+            {
+                if (!string.Equals(_delayGame, hdrGame, StringComparison.OrdinalIgnoreCase))
+                {
+                    _delayGame = hdrGame;
+                    _delaySinceMs = now;
+                    Log("HDR", $"'{hdrGame}' started – switching to HDR in {startOptions.HdrDelaySeconds} s (game option).");
+                }
+                long left = _delaySinceMs + startOptions.HdrDelaySeconds * 1000L - now;
+                if (left > 0)
+                {
+                    _waitingGame = hdrGame;
+                    _waitingMsLeft = left;
+                    return;
+                }
+            }
+
+            if (_runningGame != null)
+                _activeHdrGameProcess = _runningGame;
+
+            bool canAttempt = now - _lastAttemptMs >= SwitchSpacingMs && now >= _cooldownUntilMs;
+
+            // Video playback (RTX Video HDR / native HDR video). Games and every other HDR source come first:
+            // while they want HDR, the video logic stays out of the way and the normal monitors are used.
+            MonitorFilter? videoTarget = null;
+            if (s.VideoAuto)
+            {
+                bool otherSource = shouldEnableHdr || _runningGame != null || _activeHdrGameProcess != null;
+                if (EvaluateVideo(s, now, procName, otherSource, out string videoReason, out videoTarget) && !shouldEnableHdr)
+                {
+                    shouldEnableHdr = true;
+                    reason = videoReason;
+                }
+                else
+                {
+                    videoTarget = null;
+                }
+            }
+            else if (_videoActive || _pendingVideoKey != null)
+            {
+                ResetVideo();   // automation switched off in Settings
+            }
+
+            // Video HDR switches only the monitor the video is on; move HDR there (or back) if needed
+            if (SyncTarget(s, now, videoTarget, shouldEnableHdr, canAttempt)) return;
+
+            if (shouldEnableHdr)
+            {
+                _sdrFallbackAtMs = -1;
+                _holdHdrUntilMs = 0;   // game came back during "keep HDR after exit": nothing to wait for any more
+                _videoEnded = false;
+                if (!_hdrAll && canAttempt)
+                {
+                    TurnHdrOn(reason, Target(s));
+                    if (videoTarget != null && _activeVideoNudge && _hdrAny)
+                        ScheduleBrowserNudgeAfterHdrOn(Target(s), s.Browsers);
+                }
+            }
+            else if (_hdrAny)
+            {
+                bool isForceSdr = s.ForceSdr.Contains(procName);
+
+                // Per-game option: keep HDR on for a while after the game closes (e.g. quick restart, no double black screen)
+                if (_activeHdrGameProcess != null && _runningGame == null &&
+                    s.GameOptions.TryGetValue(_activeHdrGameProcess, out var exitOptions) && exitOptions.KeepHdrAfterExitSeconds > 0)
+                {
+                    Log("HDR", $"'{_activeHdrGameProcess}' closed – keeping HDR on for {exitOptions.KeepHdrAfterExitSeconds} s (game option).");
+                    _holdHdrUntilMs = now + exitOptions.KeepHdrAfterExitSeconds * 1000L;
+                    _activeHdrGameProcess = null;
+                }
+
+                // Hold HDR: keep-after-exit, or the "minimum time in HDR" setting. Colour-critical apps still switch at once.
+                long holdUntil = Math.Max(_holdHdrUntilMs,
+                    s.MinimumHdrMs > 0 && _hdrOnSinceMs > 0 ? _hdrOnSinceMs + s.MinimumHdrMs : 0);
+                if (!isForceSdr && now < holdUntil)
+                {
+                    _holdMsLeft = holdUntil - now;
+                    // The "return to SDR after" delay already counts during the hold, so it is not added on top
+                    if (_sdrFallbackAtMs < 0) _sdrFallbackAtMs = now + s.FallbackSeconds * 1000L;
+                    return;
+                }
+
+                // Instant turn-off: a monitored HDR game was running and just closed
+                if (_activeHdrGameProcess != null && _runningGame == null)
+                {
+                    // During a failure cooldown, keep the state and switch off as soon as the cooldown ends
+                    if (now >= _cooldownUntilMs)
+                    {
+                        string closedGame = _activeHdrGameProcess;
+                        _activeHdrGameProcess = null;
+                        _sdrFallbackAtMs = -1;
+                        TurnHdrOff($"HDR game closed ({closedGame})", Target(s), s.ReloadProfile);
+                    }
+                }
+                else if (isForceSdr && canAttempt)
+                {
+                    _sdrFallbackAtMs = -1;
+                    _videoEnded = false;
+                    TurnHdrOff($"Color-critical app active ({procName})", Target(s), s.ReloadProfile);
+                }
+                else if (_videoEnded)
+                {
+                    // The video revert delay already ran: no extra "return to SDR after" wait on top
+                    if (canAttempt)
+                    {
+                        _videoEnded = false;
+                        _sdrFallbackAtMs = -1;
+                        TurnHdrOff($"Video playback ended ({_videoEndedWhat})", Target(s), s.ReloadProfile);
+                    }
+                }
+                else if (_sdrFallbackAtMs < 0)
+                {
+                    _sdrFallbackAtMs = now + s.FallbackSeconds * 1000L;
+                }
+                else if (now >= _sdrFallbackAtMs && canAttempt)
+                {
+                    _sdrFallbackAtMs = -1;
+                    TurnHdrOff("No HDR content active anymore (desktop mode)", Target(s), s.ReloadProfile);
+                }
+            }
+            else
+            {
+                _activeHdrGameProcess = null;
+                _sdrFallbackAtMs = -1;
+                _videoEnded = false;
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Video playback
+        // ------------------------------------------------------------------
+        /// <summary>
+        /// True while a video holds HDR: it has played for the activation delay, and stays true for the revert delay
+        /// after it stops. <paramref name="target"/> is the single monitor the video is on.
+        /// </summary>
+        private bool EvaluateVideo(Snapshot s, long now, string procName, bool otherSource, out string reason, out MonitorFilter? target)
+        {
+            reason = string.Empty;
+            target = null;
+
+            if (otherSource)
+            {
+                // A game (or another HDR source) holds HDR: start fresh once it is done, no "video ended" switch-off
+                ResetVideo();
+                return false;
+            }
+
+            string? block = VideoBlockReason(s, now, procName);
+            if (block != null)
+            {
+                if (_videoActive)
+                {
+                    _videoEnded = true;   // priority rule: e.g. OBS started while a video was in HDR -> back to SDR now
+                    _videoEndedWhat = block;
+                }
+                if (block != _videoBlockLogged && (_videoActive || _pendingVideoKey != null))
+                    Log("VIDEO", $"Video HDR paused – {block}.");
+                _videoBlockLogged = block;
+                _videoActive = false;
+                _pendingVideoKey = null;
+                _videoLostAtMs = -1;
+                return false;
+            }
+            _videoBlockLogged = null;
+
+            if (now >= _nextVideoCheckMs)
+            {
+                _nextVideoCheckMs = now + VideoCheckIntervalMs;
+                DetectVideo(s, now);
+            }
+
+            var c = _videoCandidate;
+            if (c != null)
+            {
+                _videoLostAtMs = -1;
+                if (_videoActive)
+                {
+                    if (c.Key != _activeVideoKey)
+                    {
+                        _activeVideoKey = c.Key;
+                        _activeVideoTarget = _checkedTarget;
+                        _activeVideoText = c.Describe();
+                        _activeVideoNudge = c.IsBrowser && c.Kind == VideoKind.Sdr;
+                        Log("VIDEO", $"Now playing: {_activeVideoText}");
+                    }
+                }
+                else
+                {
+                    if (c.Key != _pendingVideoKey)
+                    {
+                        _pendingVideoKey = c.Key;
+                        _pendingSinceMs = now;
+                    }
+                    // The script only marks a video that is really playing (no previews, no ads), so no waiting for it.
+                    // The activation delay only filters short sounds for the audio-based detection.
+                    if (c.Reported || now - _pendingSinceMs >= s.VideoActivationMs)
+                    {
+                        _videoActive = true;
+                        _videoEnded = false;
+                        _pendingVideoKey = null;
+                        _activeVideoKey = c.Key;
+                        _activeVideoTarget = _checkedTarget;
+                        _activeVideoText = c.Describe();
+                        _activeVideoNudge = c.IsBrowser && c.Kind == VideoKind.Sdr;
+                        Log("VIDEO", $"Video playing: {_activeVideoText}");
+                    }
+                }
+            }
+            else
+            {
+                _pendingVideoKey = null;
+                if (_videoActive)
+                {
+                    if (_videoLostAtMs < 0) _videoLostAtMs = now;
+                    if (now - _videoLostAtMs >= s.VideoRevertMs)
+                    {
+                        _videoActive = false;
+                        _videoLostAtMs = -1;
+                        _videoEnded = true;
+                        _videoEndedWhat = "video stopped or paused";
+                    }
+                    else
+                    {
+                        _holdMsLeft = Math.Max(_holdMsLeft, s.VideoRevertMs - (now - _videoLostAtMs));
+                    }
+                }
+            }
+
+            if (!_videoActive) return false;
+            reason = _activeVideoText;
+            target = _activeVideoTarget;
+            return true;
+        }
+
+        private void DetectVideo(Snapshot s, long now)
+        {
+            // RTX Video HDR state (registry read; picks up a change in the NVIDIA App within a minute)
+            var rtx = _rtx;
+            if (rtx == null || now >= _nextRtxCheckMs)
+            {
+                var fresh = RtxVideoStatus.Query();
+                if (rtx == null || fresh.Describe() != rtx.Describe()) Log("VIDEO", fresh.Describe());
+                _rtx = rtx = fresh;
+                _nextRtxCheckMs = now + RtxRecheckMs;
+            }
+
+            bool allowSdr = s.VideoMode == VideoHdrModes.Always || (s.VideoMode == VideoHdrModes.Smart && rtx.CanUpgradeSdr);
+            var candidate = _video.Find(new VideoScanOptions
+            {
+                Browsers = s.Browsers,
+                Players = s.LocalPlayers,
+                IncludeBrowsers = s.VideoBrowsers,
+                IncludePlayers = s.VideoPlayers,
+                FullscreenOnly = s.VideoFullscreenOnly,
+                AllowSdr = allowSdr,
+                HdrToken = s.BrowserToken,
+                SdrToken = s.SdrToken,
+                HdrKeywords = s.VideoKeywords
+            });
+
+            if (candidate != null)
+            {
+                // Which monitor? Only looked up again when the window, its monitor or the monitor settings change
+                if (Interlocked.Exchange(ref _displaysChanged, 0) == 1 || candidate.Hwnd != _checkedHwnd ||
+                    candidate.Monitor != _checkedMonitor || !ReferenceEquals(_checkedAllowed, s.Monitors))
+                {
+                    _checkedHwnd = candidate.Hwnd;
+                    _checkedMonitor = candidate.Monitor;
+                    _checkedAllowed = s.Monitors;
+                    string? key = HdrController.ResolveVideoMonitor(candidate.Monitor, s.Monitors, out string problem);
+                    _checkedTarget = key == null ? null : VideoFilter(key);
+                    if (key == null && problem != _lastVideoProblem)
+                        Log("VIDEO", $"{candidate.Describe()} – not switching: {problem}.");
+                    _lastVideoProblem = key == null ? problem : null;
+                }
+                if (_checkedTarget == null) candidate = null;
+            }
+            _videoCandidate = candidate;
+        }
+
+        private string? VideoBlockReason(Snapshot s, long now, string procName)
+        {
+            if (s.VideoBattery)
+            {
+                if (now >= _nextBatteryCheckMs)
+                {
+                    _onBattery = PowerInfo.OnBattery();
+                    _nextBatteryCheckMs = now + 10000;
+                }
+                if (_onBattery) return "running on battery";
+            }
+            if (_runningVideoBlocker != null) return $"'{_runningVideoBlocker}' is running";
+            if (s.ForceSdr.Contains(procName)) return $"color-critical app '{procName}' is in front";
+            return null;
+        }
+
+        /// <summary>
+        /// Chrome/Edge only notice the switch to HDR (and start RTX Video HDR on the playing video) when they re-check
+        /// the display, which can take a moment. As soon as Windows reports HDR on, tell them the display changed
+        /// (same nudge as after SDR; no move, resize or focus change).
+        /// </summary>
+        private void ScheduleBrowserNudgeAfterHdrOn(MonitorFilter monitors, HashSet<string> browsers)
+        {
+            Task.Run(() =>
+            {
+                try
+                {
+                    for (int i = 0; i < 30 && !_stop; i++)   // up to 3 s
+                    {
+                        if (HdrController.QueryHdrState(monitors, out _, out bool all) && all) break;
+                        Thread.Sleep(100);
+                    }
+                    if (_stop) return;
+                    Thread.Sleep(200);   // let DWM finish the mode change
+                    WindowDetector.BroadcastDisplayChange();
+                    WindowDetector.NudgeWindows(browsers);
+                }
+                catch { }
+            });
+        }
+
+        private void ResetVideo()
+        {
+            _videoActive = false;
+            _videoEnded = false;
+            _pendingVideoKey = null;
+            _activeVideoKey = null;
+            _videoLostAtMs = -1;
+            _videoCandidate = null;
+            _nextVideoCheckMs = 0;
+        }
+
+        private MonitorFilter VideoFilter(string key)
+        {
+            if (!_videoFilters.TryGetValue(key, out var filter))
+            {
+                // OnlyPrimary = true: if that monitor is unplugged, the fallback is the primary one, never "all monitors"
+                filter = new MonitorFilter(true, new[] { key });
+                _videoFilters[key] = filter;
+            }
+            return filter;
+        }
+
+        private static bool SameTarget(MonitorFilter? a, MonitorFilter? b) =>
+            ReferenceEquals(a, b) ||
+            (a?.DevicePaths != null && b?.DevicePaths != null && a.DevicePaths.SetEquals(b.DevicePaths));
+
+        /// <summary>
+        /// Makes <paramref name="desired"/> (null = the Settings selection) the monitors that are switched.
+        /// HDR off: just adopt it. HDR on and still wanted: switch off the monitors that are not part of the new
+        /// target first (e.g. the video moved to the other screen, or a game takes over). HDR on but no longer wanted:
+        /// keep the old target, so the switch back to SDR reaches the monitors that are actually in HDR.
+        /// Returns true when this tick is used up by a switch.
+        /// </summary>
+        private bool SyncTarget(Snapshot s, long now, MonitorFilter? desired, bool wantOn, bool canAttempt)
+        {
+            if (SameTarget(desired, _videoTarget)) return false;
+
+            if (!_hdrAny)
+            {
+                _videoTarget = desired;
+                Interlocked.Exchange(ref _forceHdrQuery, 1);
+                RefreshHdrState(s, now);
+                return false;
+            }
+            if (!wantOn) return false;
+            if (!canAttempt) return true;
+
+            var off = HdrController.ResolveTargetKeys(Target(s));
+            off.ExceptWith(HdrController.ResolveTargetKeys(desired ?? s.Monitors));
+            _videoTarget = desired;
+            Interlocked.Exchange(ref _forceHdrQuery, 1);
+            if (off.Count > 0)
+            {
+                TurnHdrOff("HDR moves to another monitor", new MonitorFilter(true, off), s.ReloadProfile);
+                return true;
+            }
+            RefreshHdrState(s, now);
+            return false;
+        }
+
+        // ------------------------------------------------------------------
+        // Detection
+        // ------------------------------------------------------------------
+        // Programs whose exe path was already looked up (once per program per session)
+        private readonly HashSet<string> _pathLookupDone = new(StringComparer.OrdinalIgnoreCase);
+
+        private string? FindRunningHdrGame(Snapshot s, out string? exePath, out string? videoBlocker)
+        {
+            exePath = null;
+            videoBlocker = null;
+            bool lookForBlockers = s.VideoAuto && s.VideoBlockers.Count > 0;
+            if (s.HdrGames.Count == 0 && !lookForBlockers) return null;   // nothing to look for: skip the process list entirely
+
+            Process[] all;
+            try { all = Process.GetProcesses(); }
+            catch { return null; }
+
+            string? found = null;
+            foreach (var p in all)
+            {
+                try
+                {
+                    if (lookForBlockers && videoBlocker == null && s.VideoBlockers.Contains(p.ProcessName))
+                        videoBlocker = p.ProcessName.ToLowerInvariant();
+
+                    if (found == null)
+                    {
+                        string name = p.ProcessName;
+                        if (s.HdrGames.Contains(name) && !s.Ignored.Contains(name))
+                        {
+                            found = name.ToLowerInvariant();
+                            // First time this game is seen running: note its exe for the icon in the Games tab
+                            if (_pathLookupDone.Add(found))
+                            {
+                                exePath = ProcessPaths.TryGetExePath(p.Id);   // limited access only, never reads game memory
+                            }
+                        }
+                    }
+                }
+                catch { }
+                finally { p.Dispose(); }
+            }
+            return found;
+        }
+
+        private void RememberProgramPath(string process, string path)
+        {
+            lock (Sync)
+            {
+                if (Config.ProgramPaths.TryGetValue(process, out var known) && File.Exists(known)) return;
+                Config.ProgramPaths[process] = path;
+                Save();
+            }
+        }
+
+        private static bool EvaluateHdrRequirement(Snapshot s, string procName, string title, bool isFullscreen, out string reason)
+        {
+            reason = string.Empty;
+            if (string.IsNullOrEmpty(procName)) return false;
+
+            if (s.ForceSdr.Contains(procName) || s.Ignored.Contains(procName))
+                return false;
+
+            // 1. Selected HDR games
+            if (s.HdrGames.Contains(procName))
+            {
+                reason = $"HDR game/app in focus ({procName})";
+                return true;
+            }
+
+            // 2. Web browsers: only react to the token injected by the Tampermonkey script
+            if (s.Browsers.Contains(procName))
+            {
+                if (s.VideoAuto && s.VideoBrowsers) return false;   // handled by the video automation (EvaluateVideo)
+
+                if (!isFullscreen && !s.BrowserWindowed)
+                    return false;
+
+                if (s.BrowserToken.Length > 0 && title.Contains(s.BrowserToken, StringComparison.OrdinalIgnoreCase))
+                {
+                    reason = $"True YouTube HDR stream detected ({procName})";
+                    return true;
+                }
+                return false;
+            }
+
+            // 3. Local video players
+            if (s.VideoAuto && s.VideoPlayers && s.LocalPlayers.Contains(procName))
+                return false;   // handled by the video automation (EvaluateVideo)
+            if (isFullscreen && s.LocalPlayers.Contains(procName))
+            {
+                if (!s.RequireKeyword)
+                {
+                    reason = $"Fullscreen video in local player ({procName})";
+                    return true;
+                }
+
+                foreach (var keyword in s.VideoKeywords)
+                {
+                    if (title.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+                    {
+                        reason = $"Local HDR fullscreen video detected ({procName} – keyword: '{keyword}')";
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        // ------------------------------------------------------------------
+        // Switching HDR / SDR (engine thread only)
+        // ------------------------------------------------------------------
+        private void TurnHdrOn(string reason, MonitorFilter monitors)
+        {
+            long now = Now;
+            _lastAttemptMs = now;
+            Log("HDR", $"Turning HDR ON ({monitors.Describe()}) – {reason}");
+
+            CancelColorProfileReload();   // a reload must not run while we are going back into HDR
+            if (!_hdrAny)
+            {
+                // Remember how the displays looked in SDR, to check (and repair) them after switching back
+                try { _sdrBaseline = HdrController.CaptureColorState(monitors); }
+                catch { _sdrBaseline = null; }
+            }
+            bool ok = HdrController.SetHdrState(true, monitors);
+            if (ok)
+            {
+                if (!_hdrAny || _hdrOnSinceMs == 0) _hdrOnSinceMs = now;
+                _hdrAny = true;
+                _hdrAll = true;
+                _verifyAllOn = true;
+            }
+            else
+            {
+                Log("ERROR", HdrController.LastError);
+            }
+            AfterSwitch(ok, now);
+        }
+
+        private void TurnHdrOff(string reason, MonitorFilter monitors, bool reloadProfile)
+        {
+            long now = Now;
+            _lastAttemptMs = now;
+            Log("SDR", $"Switching to SDR ({monitors.Describe()}) – {reason}");
+
+            bool ok = HdrController.SetHdrState(false, monitors);
+            if (ok)
+            {
+                _hdrOnSinceMs = 0;
+                _holdHdrUntilMs = 0;
+                _hdrAny = false;
+                _hdrAll = false;
+                _verifyAllOn = false;
+                var snapshot = GetSnapshot();
+                var baseline = _sdrBaseline;
+                if (reloadProfile || snapshot.RefreshApps || baseline != null)
+                    SchedulePostSdrFixes(monitors, reloadProfile, snapshot.RefreshApps, snapshot.Browsers, baseline);
+            }
+            else
+            {
+                Log("ERROR", HdrController.LastError);
+            }
+            AfterSwitch(ok, now);
+        }
+
+        private void AfterSwitch(bool ok, long now)
+        {
+            // Re-read the real state once Windows has applied the change
+            _nextHdrQueryMs = now + SwitchSpacingMs;
+
+            if (ok)
+            {
+                if (!_verifyAllOn) _consecutiveFailures = 0;   // an ON is only "good" once verified
+                return;
+            }
+
+            RegisterFailure(now);
+        }
+
+        private void RegisterFailure(long now)
+        {
+            if (++_consecutiveFailures >= FailuresBeforeCooldown)
+            {
+                _consecutiveFailures = 0;
+                _cooldownUntilMs = now + FailureCooldownMs;
+                Log("ERROR", $"HDR switching failed {FailuresBeforeCooldown} times in a row – pausing automatic attempts for {FailureCooldownMs / 1000} s.");
+            }
+        }
+
+        private int _profileReloadGeneration;
+        private volatile bool _calibrationLoaderDenied;   // the Windows task needs admin rights on some PCs
+
+        /// <summary>
+        /// Clean-up after leaving HDR, run in the background:
+        /// 1. waits until Windows really reports SDR (up to 6 s), then lets the display settle (1.5 s);
+        /// 2. re-applies the colour profile (ICC calibration / gamma ramp), if enabled;
+        /// 3. tells open windows that the display changed and nudges browser windows to repaint, if enabled
+        ///    (fixes Chrome & co. staying dimmed with their cached HDR brightness);
+        /// 4. repeats steps 2-3 once a few seconds later, in case the driver reset things again.
+        /// Cancels itself if HDR is switched back on in the meantime.
+        /// </summary>
+        private void SchedulePostSdrFixes(MonitorFilter monitors, bool reloadProfile, bool refreshApps, HashSet<string> browsers,
+                                          List<DisplayColorState>? baseline)
+        {
+            int generation = Interlocked.Increment(ref _profileReloadGeneration);
+            bool Cancelled() => Volatile.Read(ref _profileReloadGeneration) != generation || _stop;
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    for (int i = 0; i < 24; i++)
+                    {
+                        if (Cancelled()) return;
+                        if (HdrController.QueryHdrState(monitors, out bool any, out _) && !any) break;
+                        Thread.Sleep(250);
+                    }
+
+                    Thread.Sleep(1500);
+                    if (Cancelled()) return;
+
+                    if (baseline != null) CheckColorsAfterSdr(baseline, monitors, report: true);
+
+                    bool profileOk = reloadProfile && !_calibrationLoaderDenied;
+                    if (profileOk)
+                    {
+                        profileOk = RunCalibrationLoader(out string error);
+                        if (!profileOk)
+                        {
+                            if (error.Contains("denied", StringComparison.OrdinalIgnoreCase))
+                            {
+                                _calibrationLoaderDenied = true;   // don't try again until the app restarts
+                                Log("INFO", "Color profile reload needs administrator rights on this PC and was skipped. " +
+                                            "Turn off 'Reload color profile after SDR' unless you use a calibration profile and run the app as administrator.");
+                            }
+                            else
+                            {
+                                Log("ERROR", $"Color profile reload failed: {error}");
+                            }
+                        }
+                    }
+
+                    int nudged = 0;
+                    if (refreshApps)
+                    {
+                        WindowDetector.BroadcastDisplayChange();
+                        nudged = WindowDetector.NudgeWindows(browsers);
+                    }
+
+                    Thread.Sleep(4000);
+                    if (Cancelled()) return;
+
+                    // Some drivers reset the gamma curve a second time a few seconds after the switch
+                    if (baseline != null) CheckColorsAfterSdr(baseline, monitors, report: false);
+
+                    if (reloadProfile && profileOk) RunCalibrationLoader(out _);
+                    if (refreshApps)
+                    {
+                        WindowDetector.BroadcastDisplayChange();
+                        WindowDetector.NudgeWindows(browsers);
+                    }
+
+                    if (reloadProfile && profileOk) Log("SDR", "Color profile re-applied.");
+                    if (refreshApps) Log("SDR", $"Open apps notified of the display change ({nudged} browser window(s) refreshed).");
+                }
+                catch (Exception ex)
+                {
+                    Log("ERROR", $"Post-SDR clean-up failed: {ex.Message}");
+                }
+            });
+        }
+
+        /// <summary>
+        /// Compares every display with its state right before HDR was switched on and logs what changed.
+        /// A gamma curve that was reset to neutral (lost calibration, night light, NVIDIA desktop colour settings)
+        /// is put back. Colour format / bit depth / colour mode changes are logged only (they belong to the driver).
+        /// </summary>
+        private void CheckColorsAfterSdr(List<DisplayColorState> before, MonitorFilter monitors, bool report)
+        {
+            List<DisplayColorState> after;
+            try { after = HdrController.CaptureColorState(monitors); }
+            catch (Exception ex)
+            {
+                if (report) Log("COLOR", $"Colour check after SDR failed: {ex.Message}");
+                return;
+            }
+
+            foreach (var b in before)
+            {
+                var a = after.FirstOrDefault(x => string.Equals(x.Key, b.Key, StringComparison.OrdinalIgnoreCase));
+                if (a == null || a.HdrOn || b.HdrOn) continue;   // unplugged, back in HDR, or was not in SDR before
+
+                var changes = new List<string>();
+                if (a.Encoding >= 0 && b.Encoding >= 0 && a.Encoding != b.Encoding)
+                    changes.Add($"colour format {DisplayColorState.EncodingName(a.Encoding)} (was {DisplayColorState.EncodingName(b.Encoding)}) – " +
+                                "set it back in NVIDIA Control Panel › Change resolution › Output color format");
+                if (a.Bits > 0 && b.Bits > 0 && a.Bits != b.Bits)
+                    changes.Add($"{a.Bits}-bit (was {b.Bits}-bit)");
+                if (a.Mode >= 0 && b.Mode >= 0 && a.Mode != b.Mode)
+                    changes.Add($"{DisplayColorState.ModeName(a.Mode)} (was {DisplayColorState.ModeName(b.Mode)})");
+
+                bool rampReset = b.Ramp != null && !b.RampIsIdentity && a.RampIsIdentity;
+                if (rampReset)
+                {
+                    bool restored = HdrController.RestoreGammaRamp(b);
+                    changes.Add(restored ? "gamma curve was reset to neutral – restored" : "gamma curve was reset to neutral – could not restore it");
+                }
+                else if (report && b.Ramp != null && a.Ramp != null && DisplayColorState.RampDistance(a.Ramp, b.Ramp) > 300)
+                {
+                    changes.Add("gamma curve changed (night light or colour settings?)");
+                }
+
+                if (report)
+                    Log("COLOR", changes.Count == 0
+                        ? $"{b.Name}: colours same as before HDR ({a.Describe()})."
+                        : $"{b.Name} after SDR: {string.Join("; ", changes)}. Before HDR: {b.Describe()}.");
+                else if (rampReset)
+                    Log("COLOR", $"{b.Name}: gamma curve was reset again a few seconds later – {changes[^1].Split('–')[^1].Trim()}.");
+            }
+        }
+
+        /// <summary>Cancels a pending colour profile reload (e.g. when HDR is switched on again).</summary>
+        private void CancelColorProfileReload() => Interlocked.Increment(ref _profileReloadGeneration);
+
+        private static bool RunCalibrationLoader(out string error)
+        {
+            error = string.Empty;
+            var psi = new ProcessStartInfo("schtasks.exe",
+                "/run /tn \"\\Microsoft\\Windows\\WindowsColorSystem\\Calibration Loader\"")
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using var p = Process.Start(psi);
+            if (p == null)
+            {
+                error = "schtasks.exe could not be started";
+                return false;
+            }
+
+            string stderr = p.StandardError.ReadToEnd();
+            p.StandardOutput.ReadToEnd();
+            if (!p.WaitForExit(5000))
+            {
+                error = "schtasks.exe did not finish";
+                return false;
+            }
+            if (p.ExitCode != 0)
+            {
+                error = string.IsNullOrWhiteSpace(stderr) ? $"schtasks.exe exit code {p.ExitCode}" : stderr.Trim();
+                return false;
+            }
+            return true;
+        }
+
+        // ------------------------------------------------------------------
+        // Public API for the UI (thread-safe)
+        // ------------------------------------------------------------------
+        public static string CleanExeInput(string rawInput)
+        {
+            string trimmed = rawInput.Trim().Trim('"', '\'');
+            if (trimmed.Contains('\\') || trimmed.Contains('/') || trimmed.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                trimmed = Path.GetFileNameWithoutExtension(trimmed);
+            return trimmed.ToLowerInvariant();
+        }
+
+        public bool IsScanning => Volatile.Read(ref _scanning) == 1;
+
+        public string? GetInitialDirectory()
+        {
+            lock (Sync)
+                return Config.CustomGameFolders.FirstOrDefault(Directory.Exists);
+        }
+
+        /// <summary>
+        /// Rows for the Games tab: every library game (real name, source, icon), then programs that are not in a
+        /// library: always the HDR-enabled ones, and the drive-scan results when includeOthers is set.
+        /// </summary>
+        public List<GameRow> GetGameRows(bool includeOthers)
+        {
+            lock (Sync)
+            {
+                var hdr = new HashSet<string>(Config.HdrGamesAndApps ?? new List<string>(), Cmp);
+                var ignored = new HashSet<string>(Config.IgnoredGames ?? new List<string>(), Cmp);
+                var options = Config.PerGameOptions ?? new Dictionary<string, GameOptions>();
+                var paths = Config.ProgramPaths ?? new Dictionary<string, string>();
+                bool HasOptions(IEnumerable<string> procs) =>
+                    procs.Any(p => options.TryGetValue(p, out var o) && o != null && !o.IsDefault);
+
+                var rows = new List<GameRow>();
+                var covered = new HashSet<string>(Cmp);
+
+                foreach (var game in Config.LibraryGames ?? new List<LibraryGame>())
+                {
+                    covered.UnionWith(game.Processes);
+                    var procs = game.Processes.Where(p => !ignored.Contains(p)).ToList();
+                    if (procs.Count == 0) continue;
+
+                    rows.Add(new GameRow
+                    {
+                        Key = game.Id,
+                        Name = game.Name,
+                        Subtitle = $"{game.Source}  ·  {procs[0]}.exe",
+                        Processes = procs,
+                        // library path, or one learned from the drive scan / a running game (e.g. Xbox games)
+                        ExePath = game.ExePath ?? procs.Select(p => paths.TryGetValue(p, out var known) ? known : null)
+                                                      .FirstOrDefault(p => p != null),
+                        Hdr = procs.Any(hdr.Contains),
+                        HasOptions = HasOptions(procs)
+                    });
+                }
+
+                var others = (Config.HdrGamesAndApps ?? new List<string>())
+                    .Concat(includeOthers ? Config.DiscoveredGames ?? new List<string>() : new List<string>())
+                    .Distinct(Cmp)
+                    .Where(p => !covered.Contains(p) && !ignored.Contains(p));
+
+                foreach (var proc in others)
+                {
+                    rows.Add(new GameRow
+                    {
+                        Key = "proc:" + proc,
+                        Name = proc,
+                        Subtitle = hdr.Contains(proc) ? $"Program  ·  {proc}.exe" : $"Found by drive scan  ·  {proc}.exe",
+                        Processes = new List<string> { proc },
+                        ExePath = paths.TryGetValue(proc, out var path) ? path : null,
+                        Hdr = hdr.Contains(proc),
+                        HasOptions = HasOptions(new[] { proc })
+                    });
+                }
+
+                return rows.OrderBy(r => r.Name, Cmp).ToList();
+            }
+        }
+
+        public void SetGameHdr(IEnumerable<string> processes, bool enabled, string displayName)
+        {
+            var list = processes.ToList();
+            lock (Sync)
+            {
+                foreach (var name in list)
+                {
+                    if (enabled)
+                    {
+                        if (!Config.HdrGamesAndApps.Contains(name, Cmp))
+                            Config.HdrGamesAndApps.Add(name);
+                    }
+                    else
+                    {
+                        Config.HdrGamesAndApps.RemoveAll(g => g.Equals(name, StringComparison.OrdinalIgnoreCase));
+                    }
+                }
+                Config.HdrGamesAndApps.Sort(Cmp);
+                InvalidateSnapshot();
+                Save();
+            }
+            Log("LIST", enabled ? $"+ '{displayName}' will use HDR" : $"- '{displayName}' no longer uses HDR");
+        }
+
+        public void IgnoreProcesses(IEnumerable<string> processes, string displayName)
+        {
+            var list = processes.ToList();
+            lock (Sync)
+            {
+                foreach (var name in list)
+                {
+                    Config.HdrGamesAndApps.RemoveAll(g => g.Equals(name, StringComparison.OrdinalIgnoreCase));
+                    if (!Config.IgnoredGames.Contains(name, Cmp))
+                        Config.IgnoredGames.Add(name);
+                }
+                InvalidateSnapshot();
+                Save();
+            }
+            Log("LIST", $"- '{displayName}' will never use HDR (excluded)");
+        }
+
+        public GameOptions GetGameOptions(IEnumerable<string> processes)
+        {
+            lock (Sync)
+            {
+                foreach (var p in processes)
+                    if (Config.PerGameOptions.TryGetValue(p, out var o) && o != null)
+                        return new GameOptions { HdrDelaySeconds = o.HdrDelaySeconds, KeepHdrAfterExitSeconds = o.KeepHdrAfterExitSeconds };
+                return new GameOptions();
+            }
+        }
+
+        public void SetGameOptions(IEnumerable<string> processes, GameOptions options, string displayName)
+        {
+            var list = processes.ToList();
+            lock (Sync)
+            {
+                foreach (var p in list)
+                {
+                    if (options.IsDefault)
+                        Config.PerGameOptions.Remove(p);
+                    else
+                        Config.PerGameOptions[p] = new GameOptions
+                        {
+                            HdrDelaySeconds = options.HdrDelaySeconds,
+                            KeepHdrAfterExitSeconds = options.KeepHdrAfterExitSeconds
+                        };
+                }
+                InvalidateSnapshot();
+                Save();
+            }
+            Log("LIST", options.IsDefault
+                ? $"'{displayName}': game options reset."
+                : $"'{displayName}': HDR delay {options.HdrDelaySeconds} s, keep HDR after exit {options.KeepHdrAfterExitSeconds} s.");
+        }
+
+        /// <summary>fromHotkey = true must only be used on the engine thread (it switches HDR immediately).</summary>
+        public bool AddGame(string procName, bool fromHotkey, string? exePath = null)
+        {
+            if (string.IsNullOrWhiteSpace(procName) || procName == "explorer" || procName == "smarthdrmanager")
+            {
+                Log("ERROR", "Invalid process name.");
+                return false;
+            }
+
+            procName = procName.ToLowerInvariant();
+            lock (Sync)
+            {
+                Config.IgnoredGames.RemoveAll(g => g.Equals(procName, StringComparison.OrdinalIgnoreCase));
+
+                if (!Config.DiscoveredGames.Contains(procName, Cmp))
+                {
+                    Config.DiscoveredGames.Add(procName);
+                    Config.DiscoveredGames.Sort(Cmp);
+                }
+
+                if (!Config.HdrGamesAndApps.Contains(procName, Cmp))
+                {
+                    Config.HdrGamesAndApps.Add(procName);
+                    Config.HdrGamesAndApps.Sort(Cmp);
+                    Log("LIST", $"+ '{procName}' added to the HDR list");
+                }
+                else
+                {
+                    Log("LIST", $"'{procName}' is already in the HDR list");
+                }
+                if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
+                    Config.ProgramPaths[procName] = exePath;   // used for the icon in the Games tab
+                InvalidateSnapshot();
+                Save();
+            }
+
+            if (fromHotkey)
+            {
+                System.Media.SystemSounds.Asterisk.Play();
+                TurnHdrOn($"'{procName}' added via hotkey", GetSnapshot().Monitors);
+            }
+            return true;
+        }
+
+        /// <summary>fromHotkey = true must only be used on the engine thread (it switches HDR immediately).</summary>
+        public void IgnoreGame(string procName, bool fromHotkey)
+        {
+            if (string.IsNullOrWhiteSpace(procName) || procName == "explorer") return;
+            procName = procName.ToLowerInvariant();
+
+            bool reload;
+            lock (Sync)
+            {
+                Config.HdrGamesAndApps.RemoveAll(g => g.Equals(procName, StringComparison.OrdinalIgnoreCase));
+                if (!Config.IgnoredGames.Contains(procName, Cmp))
+                    Config.IgnoredGames.Add(procName);
+                InvalidateSnapshot();
+                Save();
+                reload = Config.ReloadColorProfileAfterSdr;
+            }
+            Log("LIST", $"- '{procName}' will never use HDR (excluded)");
+
+            if (fromHotkey)
+            {
+                System.Media.SystemSounds.Hand.Play();
+                TurnHdrOff($"'{procName}' ignored via hotkey", GetSnapshot().Monitors, reload);
+            }
+        }
+
+        /// <summary>True while a known HDR game runs (or HDR is still held for one) or any app is full-screen in front.</summary>
+        private bool IsGameOrFullscreenActive(out string what)
+        {
+            string? game = Volatile.Read(ref _runningGame) ?? Volatile.Read(ref _activeHdrGameProcess);
+            if (game != null) { what = $"'{game}'"; return true; }
+            var status = Status;
+            if (status.IsFullscreen)
+            {
+                what = string.IsNullOrEmpty(status.ActiveProcess) ? "a full-screen app" : $"'{status.ActiveProcess}' (full screen)";
+                return true;
+            }
+            what = string.Empty;
+            return false;
+        }
+
+        /// <summary>
+        /// Scans all fixed drives for games. Works on a copy of the lists so the engine is never blocked.
+        /// <paramref name="automatic"/> scans (at startup) are skipped while a game or full-screen app is running;
+        /// the "Scan games" button always scans.
+        /// </summary>
+        public int ScanDrives(bool automatic = false)
+        {
+            if (automatic && IsGameOrFullscreenActive(out string what))
+            {
+                Log("SCAN", $"Automatic drive scan skipped – {what} is running.");
+                return 0;
+            }
+
+            if (Interlocked.Exchange(ref _scanning, 1) == 1)
+            {
+                Log("SCAN", "A drive scan is already running.");
+                return 0;
+            }
+
+            try
+            {
+                RefreshLibrary(fullRescan: true);
+
+                Log("SCAN", "Scanning drives for other programs ...");
+                AppConfig temp;
+                lock (Sync)
+                {
+                    temp = new AppConfig
+                    {
+                        CustomGameFolders = new List<string>(Config.CustomGameFolders),
+                        IgnoredGames = new List<string>(Config.IgnoredGames),
+                        DiscoveredGames = new List<string>(Config.DiscoveredGames)
+                    };
+                }
+
+                var foundPaths = new Dictionary<string, string>(Cmp);
+                int added = GameScanner.ScanAndAddGames(temp, foundPaths);
+
+                lock (Sync)
+                {
+                    // Exe locations for icons; paths picked by hand ("Add program") are kept
+                    foreach (var kv in foundPaths)
+                        if (!Config.ProgramPaths.TryGetValue(kv.Key, out var known) || !File.Exists(known))
+                            Config.ProgramPaths[kv.Key] = kv.Value;
+
+                    foreach (var g in temp.DiscoveredGames)
+                        if (!Config.DiscoveredGames.Contains(g, Cmp))
+                            Config.DiscoveredGames.Add(g);
+                    Config.DiscoveredGames.Sort(Cmp);
+                    Config.LastDriveScanUtc = DateTime.UtcNow;
+                    Save();
+                }
+                Log("SCAN", $"{added} new programs found by the drive scan.");
+                return added;
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR", $"Drive scan failed: {ex.Message}");
+                return 0;
+            }
+            finally
+            {
+                Volatile.Write(ref _scanning, 0);
+            }
+        }
+
+        public T Read<T>(Func<AppConfig, T> getter)
+        {
+            lock (Sync) return getter(Config);
+        }
+
+        public void Update(Action<AppConfig> change)
+        {
+            lock (Sync)
+            {
+                change(Config);
+                InvalidateSnapshot();
+                Save();
+            }
+        }
+
+        /// <summary>Re-reads config.json (e.g. after the user edited it in a text editor).</summary>
+        public bool ReloadConfig()
+        {
+            try
+            {
+                var fresh = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(ConfigPath));
+                if (fresh == null) return false;
+                Normalize(fresh);
+                lock (Sync)
+                {
+                    foreach (var prop in typeof(AppConfig).GetProperties())
+                        if (prop.CanWrite) prop.SetValue(Config, prop.GetValue(fresh));
+                    InvalidateSnapshot();
+                }
+                Log("CONFIG", "config.json reloaded.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR", $"config.json could not be reloaded: {ex.Message}");
+                return false;
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Config load / save (same JSON format as before)
+        // ------------------------------------------------------------------
+        private AppConfig LoadOrCreateConfig()
+        {
+            if (!File.Exists(ConfigPath))
+                return Normalize(new AppConfig());
+
+            try
+            {
+                string json = File.ReadAllText(ConfigPath);
+                return Normalize(JsonSerializer.Deserialize<AppConfig>(json) ?? new AppConfig());
+            }
+            catch (Exception ex)
+            {
+                try { File.Copy(ConfigPath, ConfigPath + ".bak", true); } catch { }
+                Log("ERROR", $"config.json unreadable ({ex.Message}) – backup saved as config.json.bak, using default values.");
+                return Normalize(new AppConfig());
+            }
+        }
+
+        /// <summary>Lists / dictionaries that are missing or null in a hand-edited config.json become empty.</summary>
+        private static AppConfig Normalize(AppConfig c)
+        {
+            c.CustomGameFolders ??= new List<string>();
+            c.IgnoredGames ??= new List<string>();
+            c.HdrGamesAndApps ??= new List<string>();
+            c.DiscoveredGames ??= new List<string>();
+            c.LocalVideoPlayers ??= new List<string>();
+            c.Browsers ??= new List<string>();
+            c.HdrVideoKeywords ??= new List<string>();
+            c.ForceSdrApps ??= new List<string>();
+            c.SelectedMonitors ??= new List<string>();
+            c.LibraryGames ??= new List<LibraryGame>();
+
+            // Case-insensitive keys (process names), also after loading from JSON
+            var options = new Dictionary<string, GameOptions>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in c.PerGameOptions ?? new Dictionary<string, GameOptions>())
+                if (kv.Value != null) options[kv.Key] = kv.Value;
+            c.PerGameOptions = options;
+
+            var paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in c.ProgramPaths ?? new Dictionary<string, string>())
+                if (!string.IsNullOrEmpty(kv.Value)) paths[kv.Key] = kv.Value;
+            c.ProgramPaths = paths;
+
+            c.HotkeyModifier = HotkeySettings.Normalize(c.HotkeyModifier);
+
+            // Same ranges as the controls in Settings
+            c.MinimumHdrSeconds = Math.Clamp(c.MinimumHdrSeconds, 0, 120);
+            c.VideoHdrBlockingApps ??= new List<string>();
+            c.VideoHdrMode = VideoHdrModes.Normalize(c.VideoHdrMode);
+            c.VideoHdrTrigger = VideoTriggers.Normalize(c.VideoHdrTrigger);
+            c.VideoHdrRevertSeconds = Math.Clamp(c.VideoHdrRevertSeconds, 0, 30);
+            c.VideoHdrActivationSeconds = Math.Clamp(c.VideoHdrActivationSeconds, 0, 30);
+            c.BrowserSdrVideoToken ??= string.Empty;
+            c.SdrFallbackDelaySeconds = Math.Clamp(c.SdrFallbackDelaySeconds, 0, 30);
+            foreach (var g in c.LibraryGames) g.Processes ??= new List<string>();
+            return c;
+        }
+
+        /// <summary>Caller must hold <see cref="Sync"/> (or be in the constructor).</summary>
+        private void Save()
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                string tmp = ConfigPath + ".tmp";
+                File.WriteAllText(tmp, JsonSerializer.Serialize(Config, options));
+                File.Move(tmp, ConfigPath, overwrite: true);   // atomic replace: never leaves a half-written config.json
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR", $"config.json could not be saved: {ex.Message}");
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Logging (memory ring buffer for the Log tab + %LocalAppData%\SmartHdrManager\log.txt)
+        // ------------------------------------------------------------------
+        public void Log(string tag, string message)
+        {
+            string line = $"[{DateTime.Now:HH:mm:ss}] {tag,-6} {message}";
+            lock (_logLock)
+            {
+                _log.Add(line);
+                if (_log.Count > 500)
+                {
+                    _log.RemoveRange(0, 100);
+                    _logBase += 100;
+                }
+            }
+            WriteFileLog(line);
+        }
+
+        public static void WriteFileLog(string line)
+        {
+            try
+            {
+                lock (FileLogLock)
+                    File.AppendAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd} {line}{Environment.NewLine}");
+            }
+            catch { }
+        }
+
+        /// <summary>Returns log lines added since <paramref name="cursor"/> and advances the cursor.</summary>
+        public string[] ReadLog(ref int cursor)
+        {
+            lock (_logLock)
+            {
+                int start = Math.Max(cursor - _logBase, 0);
+                var lines = _log.Skip(start).ToArray();
+                cursor = _logBase + _log.Count;
+                return lines;
+            }
+        }
+    }
+}
