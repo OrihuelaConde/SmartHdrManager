@@ -4,8 +4,8 @@ Turns Windows HDR on automatically when you need it – HDR games, HDR videos on
 
    ![Smart HDR Manager main window](docs/main.png)
 
-> **Beta.** Tested on Windows 11 24H2 with an NVIDIA GeForce RTX 5070 Ti and one HDR monitor (ASUS PG32UCDM).
-> Not tested yet: AMD and Intel graphics, Windows on ARM (Snapdragon), Windows 10 / Windows 11 23H2 and older, several HDR monitors, laptops.
+> **Beta.** Tested on Windows 11 25H2 with an NVIDIA GeForce RTX 5070 Ti and one HDR monitor (ASUS PG32UCDMR).
+> Not tested yet: AMD and Intel graphics, Windows on ARM (Snapdragon), Windows 10 / Windows 11 24H2 and older, several HDR monitors, laptops.
 > If something does not work on your PC, please report it (see *Reporting a problem*).
 
    ☕ **Like the app?** You can support development on [Ko-fi](https://ko-fi.com/vantacode420).
