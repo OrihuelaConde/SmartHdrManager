@@ -18,6 +18,10 @@ namespace SmartHdrManager
     // =========================================================================
     public class AppConfig
     {
+        // Format version of this file: lets newer versions fix default lists in existing config.json files once
+        // (missing in files from 2.5.0 and older = 0).
+        public int ConfigVersion { get; set; } = 0;
+
         public bool AutoScanDrivesOnStartup { get; set; } = true;
 
         // Only toggle HDR on the primary monitor (main display at desktop coordinates 0,0)
@@ -32,13 +36,8 @@ namespace SmartHdrManager
             "valorant"
         };
 
-        // Active HDR list: Only games in this list will automatically trigger HDR
-        public List<string> HdrGamesAndApps { get; set; } = new()
-        {
-            "cyberpunk2077",
-            "eldenring",
-            "alanwake2"
-        };
+        // Active HDR list: Only games in this list will automatically trigger HDR (empty: the user picks the games)
+        public List<string> HdrGamesAndApps { get; set; } = new();
 
         // Catalog of all games found on drives (selectable via menu [G] before starting a game)
         public List<string> DiscoveredGames { get; set; } = new();
@@ -49,7 +48,10 @@ namespace SmartHdrManager
             "vlc",
             "mpc-hc64",
             "potplayermini64",
-            "mpv"
+            "mpv",
+            "mpvnet",      // mpv.net
+            "mpc-be64",
+            "kodi"         // window title has no file name: only "Videos & RTX Video HDR" (Always) can use it
         };
 
         // Web browsers (never use generic keywords; only react to BrowserRealHdrToken)
@@ -123,6 +125,14 @@ namespace SmartHdrManager
         public bool VideoHdrDisableOnBattery { get; set; } = true;
         // While one of these programs runs, videos never switch HDR (a switch would disturb a recording/stream)
         public List<string> VideoHdrBlockingApps { get; set; } = new() { "obs64", "obs32" };
+        // ---- v2.5.1 ----
+        // While one of the VideoHdrBlockingApps (OBS) runs, never switch HDR on automatically – games included – and go
+        // back to SDR when it starts, so a recording is never made in HDR by mistake. Manual overrides still work.
+        public bool NoHdrWhileObsRunning { get; set; } = false;
+        // When a browser tab with the userscript marker was first seen (Settings shows "Browser script: detected")
+        public DateTime? BrowserScriptSeenUtc { get; set; }
+        // Videos tab: video players added by hand (full exe paths); installed ones are found automatically
+        public List<string> HdrPlayerPaths { get; set; } = new();
         // Marker the userscript adds to the tab title while an SDR video plays
         public string BrowserSdrVideoToken { get; set; } = "[sdr_video_active]";
 
@@ -134,7 +144,9 @@ namespace SmartHdrManager
             "photoshop",
             "lightroom",
             "resolve",
-            "premiere"
+            "premiere",
+            "adobe premiere pro",   // the real process name of Premiere Pro
+            "afterfx"               // After Effects
         };
 
         public bool EnableHdrOnProcessStart { get; set; } = true;
@@ -158,7 +170,7 @@ namespace SmartHdrManager
     {
         public string Id { get; set; } = string.Empty;          // e.g. "steam:1091500"
         public string Name { get; set; } = string.Empty;        // display name, e.g. "Cyberpunk 2077"
-        public string Source { get; set; } = string.Empty;      // Steam / Epic / GOG / Xbox
+        public string Source { get; set; } = string.Empty;      // Steam / Epic / GOG / Xbox / Ubisoft / EA app / Rockstar
         public List<string> Processes { get; set; } = new();    // process names (exe without .exe, lower case)
         public string? ExePath { get; set; }                    // main exe, used for the icon
     }
@@ -1123,6 +1135,9 @@ namespace SmartHdrManager
     // =========================================================================
     public static class WindowDetector
     {
+        /// <summary>The monitor (HMONITOR) of the window in front.</summary>
+        public static IntPtr ForegroundMonitor() => MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST);
+
         [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
         [StructLayout(LayoutKind.Sequential)] private struct MONITORINFO { public int cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
 

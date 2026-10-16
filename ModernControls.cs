@@ -104,15 +104,12 @@ namespace SmartHdrManager
             _state = state;
 
             float target = state == HdrVisualState.On ? 1f : 0f;
-            if (Math.Abs(target - _sweep) < 0.001f)
+            if (Math.Abs(target - _sweep) < 0.001f || !IsHandleCreated || !Visible)
             {
-                Invalidate(true);
-                return;
-            }
-
-            if (!IsHandleCreated || !Visible)
-            {
-                _sweep = target;   // no animation while hidden
+                // Already there, or hidden (no animation). Also stops a sweep that is still waiting for its start
+                // delay: HDR on -> off within 1.5 s used to let that sweep run on and colour the card while HDR was off.
+                _timer.Stop();
+                _sweep = _from = _to = target;
                 Invalidate(true);
                 return;
             }

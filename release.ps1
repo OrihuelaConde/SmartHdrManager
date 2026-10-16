@@ -8,7 +8,7 @@
 #   SmartHdrManager-vX.Y.Z-win-arm64-standalone  larger exe for Windows on ARM, nothing to install
 # plus a .zip of each and SHA256 checksums.
 #
-# Only whitelisted files are copied (exe, README, LICENSE, userscript), so your own
+# Only whitelisted files are copied (exe, README, CHANGELOG, LICENSE, userscript), so your own
 # config.json, config.json.old, logs and backup folders can never end up in a release.
 #
 # WARNING: everything inside the output folder is deleted first.
@@ -100,6 +100,7 @@ foreach ($p in $packages) {
     New-Item -ItemType Directory -Path $dest | Out-Null
     Copy-Item $exe $dest
     Copy-Item (Join-Path $src 'README.md') $dest
+    if (Test-Path (Join-Path $src 'CHANGELOG.md')) { Copy-Item (Join-Path $src 'CHANGELOG.md') $dest }
     Copy-Item (Join-Path $src 'LICENSE.txt') $dest
     Copy-Item (Join-Path $src 'SmartHdrManager_YouTube.user.js') $dest
 

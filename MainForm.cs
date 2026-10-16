@@ -37,6 +37,11 @@ namespace SmartHdrManager
         // Tabs
         private readonly SegmentedTabs _tabs = new() { Size = new Size(330, 40), Anchor = AnchorStyles.Top | AnchorStyles.Left, Margin = new Padding(0, 16, 0, 0) };
         private readonly Panel _content = new() { Dock = DockStyle.Fill, Margin = new Padding(0, 12, 0, 0) };
+
+        // Content column: never wider than this (96-DPI pixels). A maximized window on a 4K screen would otherwise
+        // stretch every card to the full screen width – harder to read, and much more to repaint while scrolling.
+        private const int MaxContentWidth = 900;
+        private TableLayoutPanel? _root;
         private readonly List<Control> _pages = new();
 
         // Games page
@@ -55,6 +60,7 @@ namespace SmartHdrManager
         private readonly ToggleSwitch _swKeepBrowserHdr = new();
         private readonly ToggleSwitch _swColorProfile = new();
         private readonly ToggleSwitch _swRefreshApps = new();
+        private readonly ToggleSwitch _swNoHdrObs = new();
         private readonly Stepper _fallback = new() { Minimum = 0, Maximum = 30 };
 
         // Video & RTX HDR
@@ -76,6 +82,14 @@ namespace SmartHdrManager
         };
 
         private bool _loadingSettings;
+
+        // Settings page parts that change at runtime
+        private SmoothScrollTable? _settingsPage;
+        private SmoothScrollTable? _videosPage;
+        private readonly List<(int Row, int Height, Control Control)> _videoDetailRows = new();
+        private int _videoMasterRow;
+        private Label? _scriptStatusLabel, _browserWindowedDesc, _keepBrowserDesc;
+        private bool? _lastScriptSeen;
         private bool _reallyExit;
         private int _logCursor;
         private int _lastState = -1;
@@ -108,6 +122,7 @@ namespace SmartHdrManager
             StartPosition = FormStartPosition.CenterScreen;
 
             var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(20) };
+            _root = root;
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
@@ -117,11 +132,13 @@ namespace SmartHdrManager
             root.Controls.Add(_statusCard, 0, 0);
 
             _tabs.AddTab("Games");
+            _tabs.AddTab("Videos");
             _tabs.AddTab("Settings");
             _tabs.AddTab("Log");
             root.Controls.Add(_tabs, 0, 1);
 
             AddPage(BuildGamesPage());
+            AddPage(BuildVideosPage());
             AddPage(BuildSettingsPage());
             AddPage(BuildLogPage());
             root.Controls.Add(_content, 0, 2);
@@ -310,7 +327,7 @@ namespace SmartHdrManager
             exclude.Click += (_, _) => OnExclude();
             _scanButton.Click += OnScan;
 
-            _toolTip.SetToolTip(_scanButton, "Re-read the Steam, Epic, GOG and Xbox libraries and scan your game folders");
+            _toolTip.SetToolTip(_scanButton, "Re-read the Steam, Epic, GOG, Xbox, Ubisoft, EA and Rockstar libraries and scan your game folders");
             foreach (var b in new Control[] { _scanButton, addExe, addRunning, options, exclude })
             {
                 b.Margin = new Padding(0, 0, 8, 0);
@@ -326,20 +343,34 @@ namespace SmartHdrManager
             var page = new SmoothScrollTable { ColumnCount = 1, Margin = new Padding(0), AutoScroll = true, Padding = new Padding(0, 0, SystemInformation.VerticalScrollBarWidth, 0) };
             page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             Theme.UseDarkScrollbars(page);
+            _settingsPage = page;
 
-            void Add(Control c, int height)
+            int Add(Control c, int height)
             {
                 page.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
-                page.Controls.Add(c, 0, page.RowStyles.Count - 1);
+                int row = page.RowStyles.Count - 1;
+                page.Controls.Add(c, 0, row);
+                return row;
+            }
+            void Section(string title, string description, bool first = false)
+            {
+                Add(SectionHeader(title), first ? 34 : 46);
+                Add(SectionDescription(description), 30);
             }
 
-            Add(SectionHeader("General"), 34);
+            // ---- General ----
+            Section("General", "Startup and keyboard shortcuts.", first: true);
             Add(SettingRow("Start with Windows", "Starts minimized in the system tray when you sign in.", _swAutostart), 68);
             Add(SettingRow("Scan drives automatically", "Looks for newly installed games at startup, at most once a week.", _swStartupScan), 68);
             Add(SettingRow("Keyboard shortcuts", "Modifier + H: HDR for the game in front  ·  + I: never HDR  ·  + O: override", _hotkeyChoice), 68);
 
-            Add(SectionHeader("Monitors"), 42);
-            foreach (var monitor in _engine.GetMonitors())
+            // ---- Monitors ----
+            var monitors = _engine.GetMonitors();
+            int hdrMonitors = monitors.Count(m => m.HdrSupported);
+            Section("Monitors", hdrMonitors > 1
+                ? "Only the selected displays switch to HDR. A game on another screen will not see HDR – select its monitor too."
+                : "Choose which displays switch to HDR.");
+            foreach (var monitor in monitors)
             {
                 var sw = new ToggleSwitch { Enabled = monitor.HdrSupported };
                 string title = monitor.IsPrimary ? $"{monitor.Name}  (primary)" : monitor.Name;
@@ -350,22 +381,40 @@ namespace SmartHdrManager
                 Add(SettingRow(title, desc, sw), 68);
             }
 
-            Add(SectionHeader("HDR behaviour"), 42);
-            Add(SettingRow("Browser videos in a window", "Allow HDR for YouTube when the video is not fullscreen.", _swBrowserWindowed), 68);
-            Add(SettingRow("Keep HDR when the browser loses focus", "Stays on while an HDR video plays and another window is active.", _swKeepBrowserHdr), 68);
+            // ---- Switching back ----
+            Section("Switching back to SDR", "How long HDR stays on, and when it must stay off.");
             Add(SettingRow("Return to SDR after", "Wait this long without HDR content before switching back.", _fallback), 68);
             Add(SettingRow("Minimum time in HDR", "Once HDR is on, keep it on at least this long. Fewer black screens.", _minimumHdr), 68);
-            Add(SettingRow("Reload color profile after SDR", "Re-applies your display calibration when leaving HDR.", _swColorProfile), 68);
-            Add(SettingRow("Refresh apps after SDR", "Fixes Chrome and other apps staying dimmed after leaving HDR.", _swRefreshApps), 68);
+            Add(SettingRow("No HDR while OBS is running", "Games and videos stay in SDR while OBS is open. Manual override still works.", _swNoHdrObs), 68);
 
-            Add(SectionHeader("RTX Video HDR"), 42);
-            Add(SettingRow("Switch to HDR for videos", "Turns HDR on while a video plays, and off again afterwards.", _swVideoAuto), 68);
-            Add(SettingRow("Which videos", "Smart: HDR videos, plus SDR videos for RTX Video HDR.", _videoMode), 68);
-            Add(SettingRow("When", "Full screen only avoids switching for small players.", _videoTrigger), 68);
-            Add(SettingRow("Web browsers", "Chrome, Edge, Brave, Firefox · uses the userscript.", _swVideoBrowsers), 68);
-            Add(SettingRow("Video players", "VLC, mpv, MPC-HC, PotPlayer · while they play sound.", _swVideoPlayers), 68);
-            Add(SettingRow("Back to SDR after the video stops", "Avoids black screens when skipping through a playlist.", _videoRevert), 68);
-            Add(SettingRow("Turn off on battery power", "Laptops: no video HDR while unplugged.", _swVideoBattery), 68);
+            // ---- YouTube & browser ----
+            Section("YouTube in browser", "HDR videos on YouTube. Needs the Tampermonkey script that came with the app.");
+            var guide = new ModernButton { Glyph = Theme.GlyphDocument, Text = "Installation guide", AutoSize = true };
+            guide.Click += (_, _) => OpenScriptGuide();
+            var scriptRow = SettingRow("Browser script", "Checking …", guide);
+            _scriptStatusLabel = RowDescription(scriptRow);
+            Add(scriptRow, 68);
+            var windowedRow = SettingRow("Browser videos in a window", "Allow HDR for YouTube when the video is not fullscreen.", _swBrowserWindowed);
+            _browserWindowedDesc = RowDescription(windowedRow);
+            Add(windowedRow, 68);
+            var keepRow = SettingRow("Keep HDR when the browser loses focus", "Stays on while an HDR video plays and another window is active.", _swKeepBrowserHdr);
+            _keepBrowserDesc = RowDescription(keepRow);
+            Add(keepRow, 68);
+
+            // ---- Videos & RTX Video HDR ----
+            Section("Videos / RTX Video HDR", "HDR while any video plays – also SDR videos, for NVIDIA RTX Video HDR.");
+            _videoMasterRow = Add(SettingRow("Switch to HDR for videos", "Turns HDR on while a video plays, and off again afterwards.", _swVideoAuto), 68);
+            void Detail(Control c, int height)
+            {
+                int row = Add(c, height);
+                _videoDetailRows.Add((row, height, c));
+            }
+            Detail(SettingRow("Which videos", "Smart: HDR videos, plus SDR videos for RTX Video HDR.", _videoMode), 68);
+            Detail(SettingRow("When", "Full screen only avoids switching for small players.", _videoTrigger), 68);
+            Detail(SettingRow("Web browsers", "Chrome, Edge, Brave, Firefox · uses the userscript.", _swVideoBrowsers), 68);
+            Detail(SettingRow("Video players", "Players started normally. For RTX Video HDR, the Videos tab works better.", _swVideoPlayers), 68);
+            Detail(SettingRow("Back to SDR after the video stops", "Avoids black screens when skipping through a playlist.", _videoRevert), 68);
+            Detail(SettingRow("Turn off on battery power", "Laptops: no video HDR while unplugged.", _swVideoBattery), 68);
 
             var videoCard = new RoundedPanel { Radius = 10, BackColor = Theme.Surface, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8), Padding = new Padding(16, 12, 16, 12) };
             videoCard.Controls.Add(new Label
@@ -375,13 +424,20 @@ namespace SmartHdrManager
                        "Games always come first, and videos never switch HDR while OBS is running. " +
                        "\"HDR only\": SDR videos stay in SDR. \"Always\": every video switches to HDR."
             });
-            Add(videoCard, 116);
+            Detail(videoCard, 116);
 
-            Add(SectionHeader("Advanced"), 42);
+            // ---- Display fixes ----
+            Section("Display fixes", "Repairs some side effects of leaving HDR.");
+            Add(SettingRow("Reload color profile after SDR", "Re-applies your display calibration when leaving HDR.", _swColorProfile), 68);
+            Add(SettingRow("Refresh apps after SDR", "Fixes Chrome and other apps staying dimmed after leaving HDR.", _swRefreshApps), 68);
+
+            // ---- Advanced ----
+            Section("Advanced", "Program lists (browsers, video players, SDR-only apps, apps that block HDR) and marker texts are in config.json.");
             var advanced = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = new Padding(0, 4, 0, 0) };
             var openConfig = new ModernButton { Glyph = Theme.GlyphDocument, Text = "Open config.json", AutoSize = true, Margin = new Padding(0, 0, 8, 0) };
             var reload = new ModernButton { Glyph = Theme.GlyphRefresh, Text = "Reload config.json", AutoSize = true, Margin = new Padding(0, 0, 8, 0) };
-            var openLog = new ModernButton { Glyph = Theme.GlyphFolder, Text = "Open log file", AutoSize = true, Margin = new Padding(0) };
+            var openLog = new ModernButton { Glyph = Theme.GlyphFolder, Text = "Open log file", AutoSize = true, Margin = new Padding(0, 0, 8, 0) };
+            var reset = new ModernButton { Text = "Reset to defaults", AutoSize = true, Margin = new Padding(0) };
             openConfig.Click += (_, _) => OpenInNotepad(HdrEngine.ConfigPath);
             openLog.Click += (_, _) => OpenInNotepad(HdrEngine.LogPath);
             reload.Click += (_, _) =>
@@ -389,29 +445,86 @@ namespace SmartHdrManager
                 if (_engine.ReloadConfig()) { LoadSettings(); RebuildGames(); }
                 else MessageBox.Show(this, "config.json could not be read. See the Log tab.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             };
+            reset.Click += (_, _) => OnResetSettings();
             advanced.Controls.Add(openConfig);
             advanced.Controls.Add(reload);
             advanced.Controls.Add(openLog);
+            advanced.Controls.Add(reset);
             Add(advanced, 52);
-
-            var infoCard = new RoundedPanel { Radius = 10, BackColor = Theme.Surface, Dock = DockStyle.Fill, Margin = new Padding(0, 8, 0, 8), Padding = new Padding(16, 12, 16, 12) };
-            infoCard.Controls.Add(new Label
-            {
-                Dock = DockStyle.Fill, Font = Theme.Small, ForeColor = Theme.Muted,
-                Text = "Browser videos need the Tampermonkey script that came with this app. It marks the browser tab while a video " +
-                       "is playing (HDR or SDR), and this app reacts to that marker. Program lists (browsers, video players, SDR-only apps, " +
-                       "apps that block video HDR) and the marker texts can be changed in config.json."
-            });
-            Add(infoCard, 112);
 
             page.RowStyles.Add(new RowStyle(SizeType.AutoSize));   // filler
             return page;
         }
 
+        private static Label SectionDescription(string text) => new()
+        {
+            UseMnemonic = false,   // "&" must show as "&", not underline the next letter
+            Text = text, Font = Theme.Small, ForeColor = Theme.Muted, Dock = DockStyle.Fill, AutoEllipsis = true,
+            TextAlign = ContentAlignment.TopLeft, Margin = new Padding(2, 0, 0, 6), AutoSize = false
+        };
+
+        /// <summary>The description line of a <see cref="SettingRow"/> (its last label).</summary>
+        private static Label RowDescription(RoundedPanel row) => row.Controls.OfType<Label>().Last();
+
+        /// <summary>Shows or hides the detail rows of "Videos / RTX Video HDR" (only shown while the main switch is on).</summary>
+        private void SetVideoDetailsVisible(bool visible)
+        {
+            if (_settingsPage == null) return;
+            _settingsPage.SuspendLayout();
+            foreach (var (row, height, control) in _videoDetailRows)
+            {
+                // Same scale as the "Switch to HDR for videos" row, which is never hidden: WinForms DPI-scales row
+                // heights (68 -> 102 px at 150 %), so restoring the plain value made these rows smaller than the rest.
+                float scale = _settingsPage.RowStyles[_videoMasterRow].Height / 68f;
+                _settingsPage.RowStyles[row].Height = visible ? height * scale : 0;
+                control.Visible = visible;
+            }
+            _settingsPage.ResumeLayout(true);
+        }
+
+        private void UpdateScriptStatus()
+        {
+            bool seen = _engine.BrowserScriptSeen;
+            if (_scriptStatusLabel == null || _lastScriptSeen == seen) return;
+            _lastScriptSeen = seen;
+            _scriptStatusLabel.Text = seen
+                ? "Detected ✓  The script marks your browser tabs while videos play."
+                : "Not detected yet – play a YouTube video to check. Not installed? See the guide.";
+            _scriptStatusLabel.ForeColor = seen ? Theme.Muted : Theme.Warn;
+        }
+
+        private void OpenScriptGuide()
+        {
+            const string url = "https://github.com/VantaCode420/SmartHdrManager#browser-script-needed-for-youtube-hdr-and-browser-videos";
+            try
+            {
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            }
+            catch
+            {
+                string readme = Path.Combine(AppContext.BaseDirectory, "README.md");
+                OpenInNotepad(readme);
+            }
+        }
+
+        private void OnResetSettings()
+        {
+            var answer = MessageBox.Show(this,
+                "Reset all settings to their defaults?\n\nYour games, their HDR switches and per-game options are kept. " +
+                "\"Start with Windows\" is not changed.",
+                "Reset to defaults", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.Yes) return;
+            _engine.ResetSettings();
+            _applyHotkeys();
+            LoadSettings();
+            RebuildGames();
+        }
+
         private static Label SectionHeader(string text) => new()
         {
+            UseMnemonic = false,   // "&" must show as "&", not underline the next letter
             Text = text, Font = Theme.Section, ForeColor = Theme.Text, Dock = DockStyle.Fill,
-            TextAlign = ContentAlignment.BottomLeft, Margin = new Padding(2, 0, 0, 8), AutoSize = false
+            TextAlign = ContentAlignment.BottomLeft, Margin = new Padding(2, 0, 0, 2), AutoSize = false
         };
 
         private static RoundedPanel SettingRow(string title, string description, Control control)
@@ -422,10 +535,10 @@ namespace SmartHdrManager
             var row = new RoundedPanel { Radius = 10, BackColor = Theme.Surface, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8), Size = new Size(w, h) };
 
             int textWidth = w - 18 - control.Width - 34;
-            var titleLabel = new Label { Text = title, Font = Theme.Semibold, ForeColor = Theme.Text, AutoSize = false, AutoEllipsis = true };
+            var titleLabel = new Label { UseMnemonic = false, Text = title, Font = Theme.Semibold, ForeColor = Theme.Text, AutoSize = false, AutoEllipsis = true };
             titleLabel.SetBounds(18, 10, textWidth, 22);
 
-            var descLabel = new Label { Text = description, Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = false, AutoEllipsis = true };
+            var descLabel = new Label { UseMnemonic = false, Text = description, Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = false, AutoEllipsis = true };
             descLabel.SetBounds(18, 32, textWidth, 20);
 
             control.Location = new Point(w - 18 - control.Width, (h - control.Height) / 2);
@@ -485,7 +598,7 @@ namespace SmartHdrManager
                 UpdateGamesCount();
             };
             _engine.LibraryChanged += OnLibraryChanged;
-            _games.AnimationStats += (_, message) => _engine.Log("UI", message);   // measured scroll frame rate
+            // _games.AnimationStats reports the scroll frame rate (diagnostics) – not logged in releases: it filled the log
             _swShowOthers.CheckedChanged += (_, _) =>
             {
                 if (_loadingSettings) return;
@@ -548,12 +661,15 @@ namespace SmartHdrManager
             _swVideoPlayers.CheckedChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.VideoHdrInPlayers = _swVideoPlayers.Checked); };
             _videoRevert.ValueChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.VideoHdrRevertSeconds = _videoRevert.Value); };
             _swVideoBattery.CheckedChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.VideoHdrDisableOnBattery = _swVideoBattery.Checked); };
+            _swNoHdrObs.CheckedChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.NoHdrWhileObsRunning = _swNoHdrObs.Checked); };
 
             Resize += (_, _) =>
             {
                 // Minimize = hide to tray (no taskbar button, not in Alt-Tab)
                 if (WindowState == FormWindowState.Minimized)
                     BeginInvoke(new Action(HideToTray));
+                else
+                    UpdateContentWidth();
             };
 
             FormClosing += (_, e) =>
@@ -564,6 +680,16 @@ namespace SmartHdrManager
                     HideToTray();
                 }
             };
+        }
+
+        /// <summary>Centres the content in a column of at most <see cref="MaxContentWidth"/> (wide / maximized windows).</summary>
+        private void UpdateContentWidth()
+        {
+            if (_root == null) return;
+            int edge = LogicalToDeviceUnits(20);
+            int side = Math.Max(edge, (ClientSize.Width - LogicalToDeviceUnits(MaxContentWidth)) / 2);
+            var padding = new Padding(side, edge, side, edge);
+            if (_root.Padding != padding) _root.Padding = padding;
         }
 
         // ------------------------------------------------------------------
@@ -599,6 +725,7 @@ namespace SmartHdrManager
         public void RefreshView()
         {
             var s = _engine.Status;
+            UpdateScriptStatus();
 
             // Visual state: 0 off, 1 on, 2 paused; +10 / +20 while a manual override (HDR / SDR) is active
             int state = (s.Paused && s.Override == HdrOverride.None ? 2 : s.HdrOn ? 1 : 0) + (int)s.Override * 10;
@@ -647,6 +774,14 @@ namespace SmartHdrManager
             else if (s.Paused)
             {
                 detail = "HDR is not switched automatically until you resume.";
+            }
+            else if (s.BlockedBy != null)
+            {
+                detail = $"HDR blocked – {s.BlockedBy} is running (Settings › No HDR while OBS is running)";
+            }
+            else if (s.LaunchHold)
+            {
+                detail = s.RunningGame != null ? $"Launch with HDR · {s.RunningGame}" : "Launch with HDR · starting …";
             }
             else if (s.WaitingForGame != null)
             {
@@ -815,12 +950,14 @@ namespace SmartHdrManager
             };
 
             dlg.SuspendLayout();
-            var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = new Padding(0) };
+            var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7, Margin = new Padding(0) };
             table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));   // hint text for the delay (wraps; scales with DPI)
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));   // "Launch with HDR" buttons
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));   // "Launch with HDR" hint
             table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             table.Controls.Add(new Label
@@ -841,6 +978,23 @@ namespace SmartHdrManager
             table.Controls.Add(SettingRow("Keep HDR on after the game closes",
                 "Avoids a second black screen when you restart the game quickly.", keep), 0, 3);
 
+            // "Launch with HDR": HDR on first, then the game starts (for games that only check HDR at startup)
+            var launch = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = new Padding(14, 8, 0, 0) };
+            var copySteam = new ModernButton { Text = "Copy Steam launch option", AutoSize = true, Margin = new Padding(0, 0, 8, 0) };
+            var makeShortcut = new ModernButton { Text = "Create HDR desktop shortcut", AutoSize = true, Margin = new Padding(0), Enabled = !string.IsNullOrEmpty(item.ExePath) };
+            copySteam.Click += (_, _) => CopySteamLaunchOption(dlg);
+            makeShortcut.Click += (_, _) => CreateHdrShortcut(dlg, item);
+            launch.Controls.Add(copySteam);
+            launch.Controls.Add(makeShortcut);
+            table.Controls.Add(launch, 0, 4);
+            table.Controls.Add(new Label
+            {
+                Text = "Launch with HDR: switches HDR on first, then starts the game – for games that hide their HDR option " +
+                       "when HDR was off at startup. Steam: paste into the game's Properties › Launch options.",
+                Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = false, Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.TopLeft, Margin = new Padding(18, 4, 18, 0)
+            }, 0, 5);
+
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(0, 8, 0, 0) };
             var save = new ModernButton { Text = "Save", Primary = true, AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
             var cancel = new ModernButton { Text = "Cancel", AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
@@ -851,12 +1005,12 @@ namespace SmartHdrManager
             buttons.Controls.Add(save);
             buttons.Controls.Add(cancel);
             buttons.Controls.Add(reset);
-            table.Controls.Add(buttons, 0, 4);
+            table.Controls.Add(buttons, 0, 6);
 
             dlg.Controls.Add(table);
             dlg.AutoScaleDimensions = new SizeF(96F, 96F);
             dlg.AutoScaleMode = AutoScaleMode.Dpi;
-            dlg.ClientSize = new Size(620, 328);
+            dlg.ClientSize = new Size(620, 436);
             dlg.ResumeLayout(false);
 
             if (dlg.ShowDialog(this) != DialogResult.OK) return;
@@ -864,6 +1018,268 @@ namespace SmartHdrManager
             _engine.SetGameOptions(item.Processes,
                 new GameOptions { HdrDelaySeconds = delay.Value, KeepHdrAfterExitSeconds = keep.Value }, item.Name);
             RebuildGames();
+        }
+
+        // ---- Launch with HDR ----
+        private static string LauncherExe => Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "SmartHdrManager.exe");
+
+        private static void CopySteamLaunchOption(IWin32Window owner)
+        {
+            string option = $"\"{LauncherExe}\" --launch %command%";
+            try
+            {
+                Clipboard.SetText(option);
+                MessageBox.Show(owner,
+                    "Copied:\n\n" + option + "\n\nIn Steam: right-click the game › Properties › General › Launch options, and paste it there.\n\n" +
+                    "Keep Smart HDR Manager in this folder – if you move it, copy the launch option again.",
+                    "Launch with HDR", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(owner, $"Could not copy to the clipboard ({ex.Message}).\n\n{option}", "Launch with HDR", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private static void CreateHdrShortcut(IWin32Window owner, GameItem item)
+        {
+            if (string.IsNullOrEmpty(item.ExePath) || !File.Exists(item.ExePath))
+            {
+                MessageBox.Show(owner, "The game's exe file is not known. Start the game once, or add it with \"Add program\".",
+                    "Launch with HDR", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            CreateLaunchShortcut(owner, item.Name, item.ExePath);
+        }
+
+        /// <summary>
+        /// Desktop shortcut "&lt;name&gt; (HDR)" that runs SmartHdrManager.exe --launch "&lt;exe&gt;": HDR on first, then the program.
+        /// Files dropped onto the shortcut are passed on to the program (e.g. a video onto a player shortcut).
+        /// </summary>
+        private static void CreateLaunchShortcut(IWin32Window owner, string displayName, string exePath, bool videoPlayer = false)
+        {
+            string name = string.Concat(displayName.Split(Path.GetInvalidFileNameChars())).Trim();
+            if (name.Length == 0) name = Path.GetFileNameWithoutExtension(exePath);
+            string link = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), $"{name} (HDR).lnk");
+            try
+            {
+                var shellType = Type.GetTypeFromProgID("WScript.Shell") ?? throw new InvalidOperationException("WScript.Shell is not available");
+                dynamic shell = Activator.CreateInstance(shellType)!;
+                dynamic shortcut = shell.CreateShortcut(link);
+                shortcut.TargetPath = LauncherExe;
+                shortcut.Arguments = $"{(videoPlayer ? "--launch-video" : "--launch")} \"{exePath}\"";
+                shortcut.WorkingDirectory = Path.GetDirectoryName(exePath) ?? string.Empty;
+                shortcut.IconLocation = exePath + ",0";
+                shortcut.Description = $"Start {displayName} with HDR on (Smart HDR Manager)";
+                shortcut.Save();
+                MessageBox.Show(owner, $"Shortcut created on the desktop:\n{Path.GetFileName(link)}", "Launch with HDR", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(owner, $"The shortcut could not be created ({ex.Message}).", "Launch with HDR", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Videos tab: video players started with HDR already on (for NVIDIA RTX Video HDR)
+        // ------------------------------------------------------------------
+        private Control BuildVideosPage()
+        {
+            var page = new SmoothScrollTable { ColumnCount = 1, Margin = new Padding(0), AutoScroll = true, Padding = new Padding(0, 0, SystemInformation.VerticalScrollBarWidth, 0) };
+            page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            Theme.UseDarkScrollbars(page);
+            _videosPage = page;
+            FillVideosPage();
+            return page;
+        }
+
+        private void FillVideosPage()
+        {
+            var page = _videosPage;
+            if (page == null) return;
+
+            // No drawing while the rows are rebuilt: otherwise the half-built page flashes for a moment
+            bool redrawOff = page.IsHandleCreated;
+            if (redrawOff) SendMessage(page.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+            page.SuspendLayout();
+            foreach (Control c in page.Controls.Cast<Control>().ToList())
+            {
+                ForgetToolTips(c);   // the shared ToolTip would otherwise keep the old buttons alive
+                c.Dispose();
+            }
+            page.Controls.Clear();
+            page.RowStyles.Clear();
+
+            // Row heights in the window's current scale: before WinForms has DPI-scaled the window (first build in
+            // the constructor) the plain values are used and scaled with everything else; on later rebuilds the
+            // window is already scaled, so the rows have to be too. The tab bar (designed 40 px high) tells which.
+            float scale = _tabs.Height / 40f;
+            int S(int v) => (int)Math.Round(v * scale);
+            void Add(Control c, int height)
+            {
+                page.RowStyles.Add(new RowStyle(SizeType.Absolute, S(height)));
+                page.Controls.Add(c, 0, page.RowStyles.Count - 1);
+            }
+
+            Add(SectionHeader("Video players with HDR"), 34);
+            Add(SectionDescription("Starts the player with HDR already on, so NVIDIA RTX Video HDR turns SDR videos into HDR from the first frame."), 30);
+
+            var players = VideoPlayers.Find(_engine.Read(c => c.HdrPlayerPaths.ToList()));
+            if (players.Count == 0)
+            {
+                var none = new RoundedPanel { Radius = 10, BackColor = Theme.Surface, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8), Padding = new Padding(16, 12, 16, 12) };
+                none.Controls.Add(new Label
+                {
+                    Dock = DockStyle.Fill, Font = Theme.Small, ForeColor = Theme.Muted, UseMnemonic = false,
+                    Text = "No video player found. Use \"Add player\" below to pick its .exe file."
+                });
+                Add(none, 60);
+            }
+
+            foreach (var player in players)
+            {
+                var buttons = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0), BackColor = Color.Transparent };
+                bool isApp = VideoPlayers.IsRegisteredAsApp(player.ExePath);
+                bool inMenu = VideoPlayers.IsInContextMenu(player.ExePath);
+                var p = player;
+
+                var setDefault = new ModernButton { Text = "Default app…", AutoSize = true, Primary = true, Margin = new Padding(0, 0, 8, 0) };
+                _toolTip.SetToolTip(setDefault, $"Make \"{VideoPlayers.AppName(p)}\" the app for videos: double-click any video and it plays with HDR");
+                setDefault.Click += (_, _) => OnSetDefaultPlayer(p);
+
+                var more = new ModernButton { Text = "More ▾", AutoSize = true, Margin = new Padding(0) };
+                more.Click += (_, _) =>
+                {
+                    var menu = new ContextMenuStrip { Renderer = new DarkMenuRenderer(), BackColor = Theme.Surface, ForeColor = Theme.Text, ShowImageMargin = false };
+                    menu.Items.Add("Create desktop shortcut", null, (_, _) => CreateLaunchShortcut(this, p.Name, p.ExePath, videoPlayer: true));
+                    menu.Items.Add(inMenu ? "Remove right-click entry" : "Add right-click entry (\"Play with HDR\")", null, (_, _) => ToggleContextMenu(p));
+                    if (isApp)
+                        menu.Items.Add($"Remove \"{VideoPlayers.AppName(p)}\" from Open with", null, (_, _) => OnUnregisterPlayer(p));
+                    if (p.Custom)
+                    {
+                        menu.Items.Add(new ToolStripSeparator());
+                        menu.Items.Add("Remove player from this list", null, (_, _) => RemovePlayer(p));
+                    }
+                    menu.Closed += (_, _) => BeginInvoke(new Action(menu.Dispose));
+                    menu.Show(more, new Point(0, more.Height));
+                };
+                buttons.Controls.Add(setDefault);
+                buttons.Controls.Add(more);
+                buttons.Size = buttons.PreferredSize;
+
+                var status = new List<string> { player.Custom ? "Added by you" : "Found automatically" };
+                if (isApp) status.Add("Open with ✓");
+                if (inMenu) status.Add("Right-click ✓");
+                Add(SettingRow(player.Name, $"{string.Join("  ·  ", status)}  ·  {player.ExePath}", buttons), 68);
+            }
+
+            var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = new Padding(0, 4, 0, 0) };
+            var addPlayer = new ModernButton { Glyph = Theme.GlyphAdd, Text = "Add player", AutoSize = true, Margin = new Padding(0) };
+            addPlayer.Click += (_, _) => OnAddPlayer();
+            actions.Controls.Add(addPlayer);
+            Add(actions, 52);
+
+            var info = new RoundedPanel { Radius = 10, BackColor = Theme.Surface, Dock = DockStyle.Fill, Margin = new Padding(0, 8, 0, 8), Padding = new Padding(16, 12, 16, 12) };
+            info.Controls.Add(new Label
+            {
+                Dock = DockStyle.Fill, Font = Theme.Small, ForeColor = Theme.Muted, UseMnemonic = false,
+                Text = "Easiest: \"Default app…\" – then every double-click on a video plays it with HDR on. Or use \"More\" for a " +
+                       "desktop shortcut (double-click it or drag a video onto it) or a right-click entry. HDR goes back off right " +
+                       "after the player is closed. Turn RTX Video HDR on in the NVIDIA App (System › Video). Works with " +
+                       "MPC-HC (recommended), VLC and PotPlayer – the player settings needed are in the README."
+            });
+            Add(info, 136);
+
+            page.RowStyles.Add(new RowStyle(SizeType.AutoSize));   // filler
+            page.ResumeLayout(true);
+            if (redrawOff)
+            {
+                SendMessage(page.Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero);
+                page.Invalidate(true);
+            }
+        }
+
+        private const int WM_SETREDRAW = 0x000B;
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        private void ForgetToolTips(Control control)
+        {
+            _toolTip.SetToolTip(control, null);
+            foreach (Control child in control.Controls) ForgetToolTips(child);
+        }
+
+        private void OnSetDefaultPlayer(PlayerInfo player)
+        {
+            if (!VideoPlayers.IsRegisteredAsApp(player.ExePath))
+            {
+                if (!VideoPlayers.RegisterAsApp(player, LauncherExe, out string error))
+                {
+                    MessageBox.Show(this, $"\"{VideoPlayers.AppName(player)}\" could not be registered ({error}).", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                _engine.Log("VIDEO", $"\"{VideoPlayers.AppName(player)}\" registered as an app for video files.");
+            }
+
+            MessageBox.Show(this,
+                $"\"{VideoPlayers.AppName(player)}\" is now available as an app for videos.\n\n" +
+                "Windows opens Settings › Default apps next. Click \"Set default\" at the top to use it for all video types " +
+                "(or pick single file types below).\n\n" +
+                "Windows does not let programs change this themselves, so this one step is up to you. " +
+                "Alternative: right-click a video › Open with › Choose another app › select it › Always.",
+                "Default app for videos", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            VideoPlayers.OpenDefaultAppsSettings(player.ExePath);
+            FillVideosPage();   // shows "Open with ✓"
+        }
+
+        private void OnUnregisterPlayer(PlayerInfo player)
+        {
+            VideoPlayers.UnregisterApp(player.ExePath);
+            _engine.Log("VIDEO", $"\"{VideoPlayers.AppName(player)}\" removed from Open with.");
+            FillVideosPage();
+        }
+
+        private void ToggleContextMenu(PlayerInfo player)
+        {
+            if (VideoPlayers.IsInContextMenu(player.ExePath))
+            {
+                VideoPlayers.RemoveFromContextMenu(player.ExePath);
+                _engine.Log("VIDEO", $"Right-click \"Play with HDR ({player.Name})\" removed.");
+            }
+            else if (VideoPlayers.AddToContextMenu(player, LauncherExe, out string error))
+            {
+                _engine.Log("VIDEO", $"Right-click \"Play with HDR ({player.Name})\" added for video files.");
+            }
+            else
+            {
+                MessageBox.Show(this, $"The right-click entry could not be added ({error}).", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            FillVideosPage();
+        }
+
+        private void OnAddPlayer()
+        {
+            using var dlg = new OpenFileDialog
+            {
+                Title = "Select the video player (.exe)",
+                Filter = "Programs (*.exe)|*.exe",
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)
+            };
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            string file = dlg.FileName;
+            _engine.Update(c =>
+            {
+                if (!c.HdrPlayerPaths.Contains(file, StringComparer.OrdinalIgnoreCase)) c.HdrPlayerPaths.Add(file);
+            });
+            FillVideosPage();
+        }
+
+        private void RemovePlayer(PlayerInfo player)
+        {
+            VideoPlayers.RemoveFromContextMenu(player.ExePath);
+            VideoPlayers.UnregisterApp(player.ExePath);
+            _engine.Update(c => c.HdrPlayerPaths.RemoveAll(x => string.Equals(x, player.ExePath, StringComparison.OrdinalIgnoreCase)));
+            FillVideosPage();
         }
 
         // ---- monitors ----
@@ -970,6 +1386,7 @@ namespace SmartHdrManager
                 _swColorProfile.Checked = _engine.Read(c => c.ReloadColorProfileAfterSdr);
                 _swRefreshApps.Checked = _engine.Read(c => c.RefreshAppsAfterSdr);
                 _fallback.Value = _engine.Read(c => c.SdrFallbackDelaySeconds);
+                _swNoHdrObs.Checked = _engine.Read(c => c.NoHdrWhileObsRunning);
 
                 _swVideoAuto.Checked = _engine.Read(c => c.VideoHdrAutomation);
                 _videoMode.SelectedIndex = Math.Max(0, Array.IndexOf(VideoModes, _engine.Read(c => VideoHdrModes.Normalize(c.VideoHdrMode))));
@@ -979,16 +1396,28 @@ namespace SmartHdrManager
                 _videoRevert.Value = _engine.Read(c => c.VideoHdrRevertSeconds);
                 _swVideoBattery.Checked = _engine.Read(c => c.VideoHdrDisableOnBattery);
                 UpdateVideoDependents();
+                _lastScriptSeen = null;
+                UpdateScriptStatus();
             }
             finally { _loadingSettings = false; }
         }
 
-        /// <summary>With video automation for browsers on, the two older YouTube switches no longer apply.</summary>
+        /// <summary>
+        /// The video detail rows are only shown while video switching is on. With video automation for browsers on,
+        /// the two older YouTube switches no longer apply – their description says why instead of just greying out.
+        /// </summary>
         private void UpdateVideoDependents()
         {
+            SetVideoDetailsVisible(_swVideoAuto.Checked);
+
             bool videoHandlesBrowsers = _swVideoAuto.Checked && _swVideoBrowsers.Checked;
             _swBrowserWindowed.Enabled = !videoHandlesBrowsers;
             _swKeepBrowserHdr.Enabled = !videoHandlesBrowsers;
+            const string handled = "Handled by \"Videos / RTX Video HDR\" below (its \"When\" setting applies).";
+            if (_browserWindowedDesc != null)
+                _browserWindowedDesc.Text = videoHandlesBrowsers ? handled : "Allow HDR for YouTube when the video is not fullscreen.";
+            if (_keepBrowserDesc != null)
+                _keepBrowserDesc.Text = videoHandlesBrowsers ? "Handled by \"Videos / RTX Video HDR\" below." : "Stays on while an HDR video plays and another window is active.";
         }
 
         private void OpenInNotepad(string path)

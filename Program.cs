@@ -46,6 +46,11 @@ namespace SmartHdrManager
             _timer.Start();
 
             _engine.Start();
+            if (TrayAndStartupManager.RefreshAutostartPath())
+                _engine.Log("INFO", "\"Start with Windows\" pointed to an old location – updated to this exe.");
+            if (Environment.ProcessPath is string exe &&
+                VideoPlayers.RefreshContextMenu(exe) + VideoPlayers.RefreshAppRegistrations(exe) > 0)
+                _engine.Log("INFO", "\"Play with HDR\" entries pointed to an old location – updated to this exe.");
             if (startCommand != CliCommand.None) RunCommand(startCommand);
             if (!startHidden) ShowMain();
         }
@@ -188,6 +193,18 @@ namespace SmartHdrManager
             var command = _commands.TakeSignaled();
             if (command != CliCommand.None) RunCommand(command);
 
+            // "Launch with HDR": a launcher process (--launch) asks to hold HDR while its game starts and runs.
+            // When HDR must stay off right now, tell it so it starts the game without waiting.
+            if (_commands.TakeLaunchHold())
+            {
+                var st = _engine.Status;
+                if (_engine.Paused || _engine.OverrideMode == HdrOverride.ForceSdr || st.BlockedBy != null)
+                    _commands.RefuseLaunch();
+                else
+                    _engine.HoldHdrForLaunch();
+            }
+            if (_commands.TakeLaunchRelease()) _engine.ReleaseLaunchHold();   // the game / player was closed
+
             // Only does anything if the app was built as a console exe (see ConsoleWindowHider)
             ConsoleWindowHider.HideIfMinimized();
 
@@ -260,6 +277,18 @@ namespace SmartHdrManager
             (CliCommand.TogglePause, new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\SmartHdrManager.TogglePause"))
         };
 
+        // "Launch with HDR" (see HdrLauncher): only "hold HDR" / "not now" signals, never a path or command
+        private readonly EventWaitHandle _launchHold = new(false, EventResetMode.AutoReset, HdrLauncher.HoldEventName);
+        private readonly EventWaitHandle _launchRefused = new(false, EventResetMode.AutoReset, HdrLauncher.RefusedEventName);
+
+        private readonly EventWaitHandle _launchRelease = new(false, EventResetMode.AutoReset, HdrLauncher.ReleaseEventName);
+
+        public bool TakeLaunchHold() => _launchHold.WaitOne(0);
+
+        public bool TakeLaunchRelease() => _launchRelease.WaitOne(0);
+
+        public void RefuseLaunch() => _launchRefused.Set();
+
         public void Signal(CliCommand command)
         {
             foreach (var (c, e) in _events)
@@ -292,14 +321,45 @@ namespace SmartHdrManager
         public void Dispose()
         {
             foreach (var (_, e) in _events) e.Dispose();
+            _launchHold.Dispose();
+            _launchRefused.Dispose();
+            _launchRelease.Dispose();
         }
     }
 
     internal static class Program
     {
+        // Own taskbar identity. Without it Windows groups the app by its exe path and may take the icon of ANY
+        // shortcut that points to SmartHdrManager.exe – e.g. a "Launch with HDR" desktop shortcut that shows the
+        // game's icon – for the app's taskbar button.
+        private const string AppUserModelId = "VantaCode420.SmartHdrManager";
+        private const string LauncherUserModelId = "VantaCode420.SmartHdrManager.Launcher";
+
+        [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+
+        private static void SetTaskbarIdentity(string id)
+        {
+            try { SetCurrentProcessExplicitAppUserModelID(id); } catch { }   // cosmetic only
+        }
+
         [STAThread]
         private static void Main(string[] args)
         {
+            // "Launch with HDR": SmartHdrManager.exe --launch <game> [arguments] – starts a game with HDR already on.
+            // Runs as its own small process (no window, no tray icon) and exits when the game has closed.
+            int launchIndex = Array.FindIndex(args, a => a.Equals("--launch", StringComparison.OrdinalIgnoreCase) ||
+                                                         a.Equals("--launch-video", StringComparison.OrdinalIgnoreCase));
+            if (launchIndex >= 0)
+            {
+                SetTaskbarIdentity(LauncherUserModelId);
+                Application.EnableVisualStyles();
+                bool videoPlayer = args[launchIndex].Equals("--launch-video", StringComparison.OrdinalIgnoreCase);
+                Environment.ExitCode = HdrLauncher.Run(args, launchIndex, videoPlayer);
+                return;
+            }
+
+            SetTaskbarIdentity(AppUserModelId);
             var command = CommandEvents.Parse(args);
             // A command-line action never opens the window: the app (re)starts quietly in the tray
             bool startHidden = command != CliCommand.None || args.Any(a => a.Equals("--tray", StringComparison.OrdinalIgnoreCase));

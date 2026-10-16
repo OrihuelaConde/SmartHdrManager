@@ -190,6 +190,41 @@ namespace SmartHdrManager
                 return false;
             }
         }
+
+        /// <summary>
+        /// "Start with Windows" stores the full exe path. After the app was moved or updated into a new folder
+        /// (e.g. ...-v2.5.0 -> ...-v2.5.1), the entry still points at the old location and nothing starts at sign-in.
+        /// Called at every start: if the entry exists but its exe is gone, it is updated to this exe.
+        /// Returns true when the entry was changed.
+        /// </summary>
+        public static bool RefreshAutostartPath()
+        {
+            try
+            {
+                string? exePath = Environment.ProcessPath;
+                if (string.IsNullOrEmpty(exePath)) return false;
+                using var key = Registry.CurrentUser.OpenSubKey(RunRegistryKey, true);
+                if (key?.GetValue(AppRegistryName) is not string current) return false;   // autostart is off
+
+                string wanted = $"\"{exePath}\" --tray";
+                if (string.Equals(current, wanted, StringComparison.OrdinalIgnoreCase)) return false;
+
+                // Only repair a broken entry: if the registered exe still exists (another copy of the app, e.g. a test
+                // build started from a different folder), leave it alone.
+                string registered = current.TrimStart();
+                registered = registered.StartsWith("\"")
+                    ? registered.Substring(1, Math.Max(0, registered.IndexOf('"', 1) - 1))
+                    : registered.Split(' ')[0];
+                if (registered.Length > 0 && System.IO.File.Exists(registered)) return false;
+
+                key.SetValue(AppRegistryName, wanted);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
     }
 
     // =========================================================================

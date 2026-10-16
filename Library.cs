@@ -54,6 +54,20 @@ namespace SmartHdrManager
             Try(() => games.AddRange(ScanGog()), "GOG", log);
             Try(() => games.AddRange(ScanXbox()), "Xbox", log);
 
+            // Launchers added in 2.5.1. Some games register with these AND with Steam (e.g. Rockstar or Ubisoft games
+            // bought on Steam): skip an entry whose executable is already known from an earlier source.
+            var extra = new List<LibraryGame>();
+            Try(() => extra.AddRange(ScanUbisoft()), "Ubisoft Connect", log);
+            Try(() => extra.AddRange(ScanEaApp()), "EA app", log);
+            Try(() => extra.AddRange(ScanRockstar()), "Rockstar", log);
+            var knownProcesses = new HashSet<string>(games.SelectMany(g => g.Processes), StringComparer.OrdinalIgnoreCase);
+            foreach (var g in extra)
+            {
+                if (g.Processes.Count == 0 || g.Processes.Any(knownProcesses.Contains)) continue;
+                games.Add(g);
+                foreach (var p in g.Processes) knownProcesses.Add(p);
+            }
+
             _previous = null;
 
             // One entry per id, games without a detectable executable are dropped
@@ -203,6 +217,122 @@ namespace SmartHdrManager
                 else if (exes.Count == 1 && Directory.Exists(path)) AddShippingCounterpart(exes, path);
 
                 yield return Make($"gog:{id}", name, "GOG", exes);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Ubisoft Connect: HKLM\SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs\<id>\InstallDir
+        // (display name from the "Uplay Install <id>" uninstall entry, else the folder name)
+        // ------------------------------------------------------------------
+        private static IEnumerable<LibraryGame> ScanUbisoft()
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs");
+            if (key == null) yield break;
+
+            foreach (string id in key.GetSubKeyNames())
+            {
+                using var game = key.OpenSubKey(id);
+                string dir = (game?.GetValue("InstallDir") as string ?? string.Empty).Replace('/', '\\').TrimEnd('\\');
+                if (dir.Length == 0 || !Directory.Exists(dir)) continue;
+
+                string folderName = Path.GetFileName(dir);
+                string name = UninstallDisplayName($"Uplay Install {id}") ?? folderName;
+                if (IsNonGameName(name)) continue;
+
+                string libId = $"ubisoft:{id}";
+                if (TryReuse(libId, name, "Ubisoft", out var cached))
+                {
+                    yield return cached;
+                    continue;
+                }
+                yield return Make(libId, name, "Ubisoft", FindGameExecutables(dir, name, folderName));
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // EA app (and old Origin installs): uninstall entries whose uninstaller lives in "EAInstaller"
+        // ------------------------------------------------------------------
+        private static IEnumerable<LibraryGame> ScanEaApp()
+        {
+            foreach (var (subKey, name, location, uninstall) in UninstallEntries())
+            {
+                if (uninstall.IndexOf("EAInstaller", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                string dir = location.Trim().Trim('"').TrimEnd('\\');
+                if (name.Length == 0 || dir.Length == 0 || !Directory.Exists(dir) || IsNonGameName(name)) continue;
+
+                string libId = $"ea:{subKey}";
+                if (TryReuse(libId, name, "EA app", out var cached))
+                {
+                    yield return cached;
+                    continue;
+                }
+                yield return Make(libId, name, "EA app", FindGameExecutables(dir, name, Path.GetFileName(dir)));
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Rockstar Games Launcher: HKLM\SOFTWARE\WOW6432Node\Rockstar Games\<game>\InstallFolder
+        // ------------------------------------------------------------------
+        private static IEnumerable<LibraryGame> ScanRockstar()
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\Rockstar Games");
+            if (key == null) yield break;
+
+            foreach (string sub in key.GetSubKeyNames())
+            {
+                // Launcher, Social Club and similar entries are not games
+                if (sub.IndexOf("launcher", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    sub.IndexOf("social club", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+
+                using var game = key.OpenSubKey(sub);
+                string dir = (game?.GetValue("InstallFolder") as string ?? string.Empty).Trim().Trim('"').TrimEnd('\\');
+                if (dir.Length == 0 || !Directory.Exists(dir) || IsNonGameName(sub)) continue;
+
+                string libId = $"rockstar:{sub}";
+                if (TryReuse(libId, sub, "Rockstar", out var cached))
+                {
+                    yield return cached;
+                    continue;
+                }
+                yield return Make(libId, sub, "Rockstar", FindGameExecutables(dir, sub, Path.GetFileName(dir)));
+            }
+        }
+
+        private static string? UninstallDisplayName(string subKey)
+        {
+            foreach (string root in new[] { @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall", @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" })
+            {
+                try
+                {
+                    using var key = Registry.LocalMachine.OpenSubKey(root + "\\" + subKey);
+                    if (key?.GetValue("DisplayName") is string name && name.Trim().Length > 0) return name.Trim();
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        /// <summary>(subkey, DisplayName, InstallLocation, UninstallString) of installed programs (HKLM, 32 + 64 bit).</summary>
+        private static IEnumerable<(string SubKey, string Name, string Location, string Uninstall)> UninstallEntries()
+        {
+            foreach (string root in new[] { @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall", @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" })
+            {
+                using var key = Registry.LocalMachine.OpenSubKey(root);
+                if (key == null) continue;
+                foreach (string sub in key.GetSubKeyNames())
+                {
+                    string name = string.Empty, location = string.Empty, uninstall = string.Empty;
+                    try
+                    {
+                        using var entry = key.OpenSubKey(sub);
+                        if (entry == null) continue;
+                        name = (entry.GetValue("DisplayName") as string ?? string.Empty).Trim();
+                        location = entry.GetValue("InstallLocation") as string ?? string.Empty;
+                        uninstall = entry.GetValue("UninstallString") as string ?? string.Empty;
+                    }
+                    catch { continue; }
+                    yield return (sub, name, location, uninstall);
+                }
             }
         }
 
