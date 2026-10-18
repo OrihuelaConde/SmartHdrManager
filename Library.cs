@@ -41,13 +41,35 @@ namespace SmartHdrManager
             "dxwebsetup", "physx", "ue4prereq", "ueprereq", "unitycrashhandler", "crs-handler", "cmd", "python"
         };
 
+        // Launcher programs that only start the real game and then close (or wait in the background). A library entry
+        // that points at one of these would make the app watch the launcher instead of the game (GitHub issue #1:
+        // The Witcher 3 from GOG registers REDprelauncher.exe). Compared without spaces, dashes or dots.
+        private static readonly HashSet<string> KnownLaunchers = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "redprelauncher", "redlauncher", "gtavlauncher", "playgtav", "playrdr2", "rdr2launcher", "launcher",
+            "startprotectedgame", "launcherpatcher", "gamelauncher", "bootstrapper"
+        };
+
+        // Extra executables of the same game (2.5.2): never added just because they score close to the main exe
+        private static readonly string[] NotAGameExeParts =
+        {
+            "launcher", "config", "settings", "setting", "benchmark", "editor", "tool", "server", "modmanager",
+            "mod_manager", "uploader", "patch", "selector", "inst", "map", "sdk", "p4v", "vcs"
+        };
+
+        // Bumped when the exe detection changes, so cached library entries are detected again once after an update
+        // (2: launcher check + several exes per game, 3: extra exes must belong to the game by name – 2.5.2).
+        public const int CurrentScanVersion = 3;
+
         // Executables found earlier, by game id: reused when the main exe still exists, so a quick refresh
         // does not have to search every install folder again (a full rescan passes null).
         [ThreadStatic] private static IReadOnlyDictionary<string, LibraryGame>? _previous;
+        [ThreadStatic] private static Action<string>? _log;
 
         public static List<LibraryGame> Scan(IReadOnlyDictionary<string, LibraryGame>? previous, Action<string>? log = null)
         {
             _previous = previous;
+            _log = log;
             var games = new List<LibraryGame>();
             Try(() => games.AddRange(ScanSteam()), "Steam", log);
             Try(() => games.AddRange(ScanEpic()), "Epic Games", log);
@@ -69,6 +91,7 @@ namespace SmartHdrManager
             }
 
             _previous = null;
+            _log = null;
 
             // One entry per id, games without a detectable executable are dropped
             return games
@@ -169,18 +192,10 @@ namespace SmartHdrManager
                     bool isDlc = mainApp.Length > 0 && appName.Length > 0 && !mainApp.Equals(appName, StringComparison.OrdinalIgnoreCase);
                     if (!incomplete && !isDlc && name.Length > 0 && location.Length > 0 && !IsNonGameName(name))
                     {
-                        var exes = new List<string>();
-                        if (launch.Length > 0)
-                        {
-                            string exe = Path.Combine(location, launch.Replace('/', '\\'));
-                            if (File.Exists(exe)) exes.Add(exe);
-                        }
-                        if (exes.Count == 0 && Directory.Exists(location))
-                            exes = FindGameExecutables(location, name, Path.GetFileName(location.TrimEnd('\\')));
-                        else if (exes.Count == 1)
-                            AddShippingCounterpart(exes, location);
-
-                        game = Make($"epic:{(appName.Length > 0 ? appName : name)}", name, "Epic Games", exes);
+                        string id = $"epic:{(appName.Length > 0 ? appName : name)}";
+                        string? registered = launch.Length > 0 ? Path.Combine(location, launch.Replace('/', '\\')) : null;
+                        var exes = RegisteredOrFound(id, name, "Epic Games", registered, location, Path.GetFileName(location.TrimEnd('\\')));
+                        game = Make(id, name, "Epic Games", exes);
                     }
                 }
                 catch { }
@@ -211,12 +226,10 @@ namespace SmartHdrManager
                 string dependsOn = game.GetValue("dependsOn") as string ?? string.Empty;
                 if (name.Length == 0 || dependsOn.Length > 0 || IsNonGameName(name)) continue;   // dependsOn = DLC
 
-                var exes = new List<string>();
-                if (exe.Length > 0 && File.Exists(exe)) exes.Add(exe);
-                if (exes.Count == 0 && Directory.Exists(path)) exes = FindGameExecutables(path, name, Path.GetFileName(path.TrimEnd('\\')));
-                else if (exes.Count == 1 && Directory.Exists(path)) AddShippingCounterpart(exes, path);
-
-                yield return Make($"gog:{id}", name, "GOG", exes);
+                // The registered exe can be a launcher (The Witcher 3 / Cyberpunk 2077: REDprelauncher.exe, GitHub issue #1)
+                string libId = $"gog:{id}";
+                var exes = RegisteredOrFound(libId, name, "GOG", exe.Length > 0 ? exe : null, path, Path.GetFileName(path.TrimEnd('\\')));
+                yield return Make(libId, name, "GOG", exes);
             }
         }
 
@@ -480,6 +493,7 @@ namespace SmartHdrManager
             var prev = _previous;
             if (prev == null || !prev.TryGetValue(id, out var old) || old.Processes.Count == 0) return false;
             if (string.IsNullOrEmpty(old.ExePath) || !File.Exists(old.ExePath)) return false;
+            if (old.ScanVersion < CurrentScanVersion) return false;   // found by an older version: detect once more
 
             game = new LibraryGame
             {
@@ -487,7 +501,8 @@ namespace SmartHdrManager
                 Name = name.Trim(),
                 Source = source,
                 Processes = new List<string>(old.Processes),
-                ExePath = old.ExePath
+                ExePath = old.ExePath,
+                ScanVersion = old.ScanVersion
             };
             return true;
         }
@@ -504,9 +519,57 @@ namespace SmartHdrManager
                     .Where(p => p.Length > 0)
                     .Distinct()
                     .ToList(),
-                ExePath = exePaths.FirstOrDefault(File.Exists)
+                ExePath = exePaths.FirstOrDefault(File.Exists),
+                ScanVersion = CurrentScanVersion
             };
         }
+
+        /// <summary>
+        /// True for programs that only start the real game: names containing "launcher" and a few known stubs
+        /// (REDprelauncher, PlayGTAV, start_protected_game, …).
+        /// </summary>
+        public static bool LooksLikeLauncher(string exePathOrName)
+        {
+            string key = Normalize(Path.GetFileNameWithoutExtension(exePathOrName));
+            return key.Contains("launcher") || KnownLaunchers.Contains(key);
+        }
+
+        /// <summary>
+        /// Executables of a library game whose launcher registers an exe (GOG, Epic). If that exe is a launcher, the
+        /// install folder is searched for the real game instead, so the app watches the program that actually runs
+        /// while playing. The launcher is only kept when nothing else is found.
+        /// </summary>
+        private static List<string> RegisteredOrFound(string id, string name, string source, string? registeredExe, string folder, string installDir)
+        {
+            bool folderOk = folder.Length > 0 && Directory.Exists(folder);
+            var exes = new List<string>();
+
+            if (!string.IsNullOrEmpty(registeredExe) && File.Exists(registeredExe))
+            {
+                if (folderOk && LooksLikeLauncher(registeredExe))
+                {
+                    var found = FindGameExecutables(folder, name, installDir).Where(e => !LooksLikeLauncher(e)).ToList();
+                    if (found.Count > 0)
+                    {
+                        // Logged once, not at every start (unchanged result = same processes as last time)
+                        var names = found.Select(e => Path.GetFileNameWithoutExtension(e).ToLowerInvariant()).Distinct().ToList();
+                        bool known = _previous != null && _previous.TryGetValue(id, out var old) &&
+                                     names.All(n => old.Processes.Contains(n, StringComparer.OrdinalIgnoreCase));
+                        if (!known)
+                            _log?.Invoke($"{source}: '{name}' registers {Path.GetFileName(registeredExe)}, which is a launcher – " +
+                                         $"watching {string.Join(", ", names.Select(n => n + ".exe"))} instead.");
+                        return found;
+                    }
+                }
+                exes.Add(registeredExe);
+                if (folderOk) AddShippingCounterpart(exes, folder);
+                return exes;
+            }
+
+            return folderOk ? FindGameExecutables(folder, name, installDir) : exes;
+        }
+
+        public static bool IsExcludedExeName(string fileNameWithoutExt) => IsExcludedExe(fileNameWithoutExt);
 
         private static bool IsNonGameName(string name)
         {
@@ -560,9 +623,42 @@ namespace SmartHdrManager
                 candidates.Add((exe, score));
             }
 
-            var result = candidates.OrderByDescending(c => c.Score).Take(1).Select(c => c.Path).ToList();
-            if (result.Count == 1) AddShippingCounterpart(result, folder);
+            var ordered = candidates.OrderByDescending(c => c.Score).ToList();
+            var result = ordered.Take(1).Select(c => c.Path).ToList();
+            if (result.Count == 0) return result;
+            AddShippingCounterpart(result, folder);
+
+            // Some games ship separate exes, e.g. for DX11 / DX12 / Vulkan: also watch other exes that score almost as
+            // well as the best one (at most 3 names in total). Only exes that clearly belong to the game: the name
+            // matches the game / folder name, or starts like the main exe ("Game_DX12" next to "Game"). Tools,
+            // launchers, installers and patchers are never added (e.g. a bundled "p4vinst64.exe" next to "OLGame.exe").
+            double best = ordered[0].Score;
+            string bestKey = Normalize(Path.GetFileNameWithoutExtension(ordered[0].Path));
+            var names = new HashSet<string>(result.Select(p => Path.GetFileNameWithoutExtension(p)), StringComparer.OrdinalIgnoreCase);
+            foreach (var (path, score) in ordered.Skip(1))
+            {
+                if (names.Count >= 3 || score < best - 1.0) break;
+                string file = Path.GetFileNameWithoutExtension(path);
+                string lower = file.ToLowerInvariant();
+                if (names.Contains(file) || NotAGameExeParts.Any(lower.Contains) || LooksLikeLauncher(file)) continue;
+
+                string key = Normalize(file);
+                bool namedLikeGame = key.Length >= 3 && (key == nameKey || key == dirKey || nameKey.Contains(key) || dirKey.Contains(key));
+                bool sameStem = key.Length >= 4 && bestKey.Length >= 4 && (key.StartsWith(bestKey) || bestKey.StartsWith(key) ||
+                                CommonPrefixLength(key, bestKey) >= Math.Max(4, Math.Min(key.Length, bestKey.Length) - 2));
+                if (!namedLikeGame && !sameStem) continue;
+
+                result.Add(path);
+                names.Add(file);
+            }
             return result;
+        }
+
+        private static int CommonPrefixLength(string a, string b)
+        {
+            int n = Math.Min(a.Length, b.Length), i = 0;
+            while (i < n && a[i] == b[i]) i++;
+            return i;
         }
 
         /// <summary>Unreal games: "Game.exe" only starts "Game-Win64-Shipping.exe" (the real process) and the other way round.</summary>

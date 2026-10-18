@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.5.2 – 2026-10
+
+### Fixed
+- **Games with a launcher did not switch HDR** ([#1](https://github.com/VantaCode420/SmartHdrManager/issues/1), The Witcher 3 GOG): GOG and Epic register the exe their launcher starts – for some games that is a launcher such as REDprelauncher.exe, not the game. The app then watched the launcher, which closes after a moment, and never saw the real game. Now a registered launcher is skipped and the game folder is searched for the real game exe.
+- **HDR stayed on after "Exit"**: the app now switches back to SDR when you exit it, if it turned HDR on. HDR that was already on before, was switched by something else, or belongs to a game that is still running is left alone.
+- **Log deleted at startup:** a log file over 1 MB was deleted when the app started – exactly the information needed after a crash. It now moves to `log.old.txt` instead.
+- **Win+Alt+I with a browser in front** excluded the browser for good (no more YouTube HDR or browser videos). With a browser or video player in front it now means *SDR for this video*.
+
+### New
+- **Launcher safety net:** if a game in your list closes within 15 s, HDR stays on while the app waits up to 45 s for a program from the same folder (the real game). It follows it and remembers it (`LauncherGames` in config.json), so next time HDR switches as soon as the game starts. Also works for launchers nobody knows about yet. Only process names are compared – anti-cheat safe.
+- **SDR for this video** (tray menu, shown while a video uses HDR): back to SDR now; this video stays in SDR until it stops or the next video starts (new title in the tab / player). *HDR for videos again* in the same menu ends it early.
+- **Back to SDR after the video stops** can be set up to **5 minutes** (was 30 s): 0–3, 5, 10, 15, 20, 30 s, 1, 2, 3, 5 min.
+- **Browser script 3.1:** a paused video keeps its marker for up to 10 minutes while its tab is visible, so pausing no longer switches HDR off and on again (3.0 kept it 60 s and only for HDR videos). Optional update – 3.0 keeps working.
+- Several exes per game: games with separate exes (e.g. DX11 / DX12) are watched with all of them. The Games tab shows "witcher3.exe +1".
+- GitHub issue form (asks for version, Windows, GPU, monitors and the log).
+
+### Improved
+- When a rescan finds different exes for a game, its HDR setting and game options move to the new exes (no game suddenly "off", no stray launcher entry). All library games are detected once more after the update.
+- Log: "Display control" now shows the real Windows version and build (e.g. "Windows 11 25H2 (build 26200.9711)") instead of "24H2+".
+- README: FAQ (Why not leave HDR on? HDR switches too often for videos, AMD / Intel), launcher section, issue link.
+
 ## 2.5.1 – 2026-10
 
 ### New

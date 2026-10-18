@@ -27,10 +27,20 @@ namespace SmartHdrManager
 
         public TrayAndStartupManager(Action openMainWindow, Action<bool> setPaused, Action exit,
                                      Action<HdrOverride, TimeSpan?> setOverride, Func<(HdrOverride Mode, bool Timed)> getOverride,
-                                     Func<string> overrideShortcut)
+                                     Func<string> overrideShortcut, Func<int> videoState, Action skipVideo, Action resumeVideo)
         {
             var openItem = new ToolStripMenuItem("Open Smart HDR Manager") { Font = new Font(SystemFonts.MenuFont ?? SystemFonts.DefaultFont, FontStyle.Bold) };
             openItem.Click += (_, _) => openMainWindow();
+
+            // Settings › Videos / RTX Video HDR. Shown while a video uses HDR ("SDR for this video": back to SDR until that
+            // video stops), and while that is active ("HDR for videos again": end it early). Hidden otherwise.
+            int shownVideoState = 0;
+            var skipVideoItem = new ToolStripMenuItem("SDR for this video") { Visible = false };
+            skipVideoItem.Click += (_, _) =>
+            {
+                if (shownVideoState == 2) resumeVideo();
+                else skipVideo();
+            };
 
             _pauseItem = new ToolStripMenuItem("Pause automation") { CheckOnClick = true };
             _pauseItem.CheckedChanged += (_, _) =>
@@ -90,12 +100,19 @@ namespace SmartHdrManager
                 ShowImageMargin = true
             };
             menu.Items.Add(openItem);
+            menu.Items.Add(skipVideoItem);
             menu.Items.Add(overrideMenu);
             menu.Items.Add(_pauseItem);
             menu.Items.Add(_autostartItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exitItem);
-            menu.Opening += (_, _) => _autostartItem.Checked = IsAutostartEnabled();
+            menu.Opening += (_, _) =>
+            {
+                _autostartItem.Checked = IsAutostartEnabled();
+                shownVideoState = videoState();
+                skipVideoItem.Visible = shownVideoState != 0;
+                skipVideoItem.Text = shownVideoState == 2 ? "HDR for videos again (end \"SDR for this video\")" : "SDR for this video";
+            };
 
             // Tray icon shows the state at a glance: colourful = HDR on, grey = SDR, amber = paused
             int iconSize = Math.Max(16, SystemInformation.SmallIconSize.Width);

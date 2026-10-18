@@ -2,7 +2,7 @@
 
 Turns Windows HDR on automatically when you need it – HDR games, HDR videos on YouTube, local videos in your video player (including SDR videos with NVIDIA RTX Video HDR) – and back to SDR when you are done. It lives in the system tray.
 
-**New in 2.5.1:** Videos tab (double-click any video and it plays with HDR – made for RTX Video HDR), *Launch with HDR* for games, *No HDR while OBS is running*, Ubisoft / EA / Rockstar games, a tidier Settings page and many fixes. See [CHANGELOG.md](CHANGELOG.md).
+**New in 2.5.2:** games with a launcher (The Witcher 3 from GOG, Cyberpunk 2077, Rockstar games …) now switch HDR reliably, HDR stays on while a video is paused, *SDR for this video* in the tray menu, back to SDR when you exit the app. **2.5.1:** Videos tab (double-click any video and it plays with HDR – made for RTX Video HDR), *Launch with HDR*, *No HDR while OBS is running*, Ubisoft / EA / Rockstar games. See [CHANGELOG.md](CHANGELOG.md).
 
    ![Smart HDR Manager main window](docs/main.png)
 
@@ -49,14 +49,16 @@ Settings are stored in `%AppData%\SmartHdrManager\config.json`, the log in `%Loc
 | A video is opened with "<Player> (with HDR)" | **Videos** tab: HDR switches on *before* the player starts – best for RTX Video HDR (see below). |
 | *(optional)* Any video plays – for **RTX Video HDR** | Settings › Videos / RTX Video HDR. Browsers via the script, video players while they play. |
 
-When the content ends, the app waits a few seconds (Settings › *Return to SDR after*) and switches back to SDR.
+When the content ends, the app waits a few seconds (Settings › *Return to SDR after*) and switches back to SDR. When you exit the app, it switches back to SDR if it turned HDR on (HDR that was already on, or a game that is still running, is left alone).
+
+**Games with a launcher** (REDprelauncher, PlayGTAV, …): if a game in your list closes within a few seconds, the app keeps HDR on and waits up to 45 s for the real game from the same folder, follows it and remembers it – next time HDR switches straight away. The log says "Following '…' (started by '…')". Libraries that register a launcher instead of the game (e.g. The Witcher 3 from GOG) are detected correctly since 2.5.2.
 
 **Games tab:** **Scan games** re-reads the game libraries and your drives. **Add program** / **Add running** adds any other program. **Options** sets a per-game delay before HDR (for games that crash or flicker if HDR switches during startup), how long HDR stays on after the game closes, and **Launch with HDR** (see below). **Never HDR** removes a game for good.
 
-**Tray menu:** open the window, pause automation, **HDR override** (force HDR on or SDR for a while), exit.
+**Tray menu:** open the window, **SDR for this video** (only shown while a video uses HDR: back to SDR until that video stops – the next video switches as usual; *HDR for videos again* ends it early), pause automation, **HDR override** (force HDR on or SDR for a while), exit.
 
 **Keyboard shortcuts** (Settings › Keyboard shortcuts – Win+Alt, Ctrl+Alt or off):
-`+ H` use HDR for the game in front · `+ I` never HDR for it · `+ O` override: HDR on → SDR → automatic.
+`+ H` use HDR for the game in front · `+ I` never HDR for it (browser or video player in front: *SDR for this video* – the browser itself is never excluded) · `+ O` override: HDR on → SDR → automatic.
 
 **Command line** (for Stream Deck buttons, shortcuts or scripts – a second launch only passes the command to the running app):
 ```
@@ -141,6 +143,8 @@ With **Settings › Videos / RTX Video HDR › Switch to HDR for videos**, the a
 - **Smart** – HDR videos, plus SDR videos when RTX Video HDR is switched on in the NVIDIA App.
 - **HDR only** – only real HDR videos. **Always** – every video.
 - **When:** *Full screen* (recommended) or *Any* (also windowed).
+- **Back to SDR after the video stops:** 0 s up to 5 minutes. Pausing does not switch HDR off with browser script 3.1 (it keeps the marker for up to 10 minutes while the paused video's tab is visible); for video players, choose a longer delay if you pause often.
+- **One video should stay in SDR:** tray menu › **SDR for this video** (or the `+ I` shortcut with the browser / player in front). Other and later videos switch as usual.
 - **Video players:** detects players started normally. For RTX Video HDR in players, the Videos tab works better (see above) – if you use it, you can turn this switch off.
 - Only the monitor that shows the video is switched (it must be enabled under Settings › Monitors).
 - Games always come first. While **OBS** is running, videos never switch HDR (it would disturb a recording) – turn on *No HDR while OBS is running* to keep games in SDR too. On battery power it is off unless you change that.
@@ -180,7 +184,7 @@ On YouTube it also makes the site offer the HDR version of a video while Windows
 
 Settings › YouTube in browser shows **Browser script: Detected ✓** once the app has seen the marker. Or open any YouTube video and hover over the browser tab: the title ends with **[sdr_video_active]** while it plays, or **[real_hdr_active]** for an HDR video (search YouTube for "4K HDR"). No marker? Check that the script is enabled in the Tampermonkey dashboard and that *Allow User Scripts* / *Developer mode* is on.
 
-**Updating the script:** open the Tampermonkey dashboard, click the script, replace its text with the new file and save.
+**Updating the script:** open the Tampermonkey dashboard, click the script, replace its text with the new file and save. The version is shown in the dashboard – **3.1** (2.5.2) keeps HDR on while a video is paused; 3.0 still works with the app.
 
 ---
 
@@ -210,11 +214,26 @@ Settings › YouTube in browser shows **Browser script: Detected ✓** once the 
 - **A game switches HDR itself (its own HDR option):** the app notices and keeps HDR on until the game closes – the log says "switched HDR on itself". Adding the game to your list works too.
 - **RTX Video HDR does not kick in for local videos:** start the player through the Videos tab, and check the player settings above.
 - **Several monitors:** by default only the primary monitor is switched. If a game runs on another screen, the log shows a `HINT` line – select that monitor in Settings › Monitors.
+- **A game from your list does not switch HDR:** look at the line under its name in the Games tab – it shows the exe the app watches (e.g. "GOG · witcher3.exe"). If that is a launcher, start the game once: the app follows the real game and remembers it. Or add the game's exe with **Add program**, or press `+ H` while the game is in front.
 - Program lists (browsers, video players, SDR-only apps, apps that block video HDR) can be edited in `config.json` (Settings › Open config.json, then *Reload config.json*).
+
+## FAQ
+
+**Why not just leave HDR on all the time?**
+You can, if you are happy with it. Many people switch because of how Windows shows normal (SDR) content in HDR mode: Windows maps SDR with the piecewise sRGB curve, while most SDR content is made for gamma 2.2, so dark tones look greyer and the desktop looks washed out. OLED monitors are often less bright for full-screen white in HDR mode, some games and apps behave oddly or show banding with HDR on, and screenshots / recordings in HDR come out blown out. The app gives you HDR only while there is HDR content – and SDR the rest of the time.
+
+**HDR switches too often for videos.**
+Settings › Videos / RTX Video HDR: set *Which videos* to **HDR only** (SDR videos then stay in SDR – RTX Video HDR is not used for them), and/or set *Back to SDR after the video stops* to 1–5 minutes. Update the browser script to 3.1, so pausing a video does not switch HDR off. If you don't want video switching at all, turn off *Switch to HDR for videos* – games still switch.
+
+**One video should not use HDR.**
+Tray menu › **SDR for this video**, or `+ I` (Win+Alt+I by default) while the browser / player is in front.
+
+**Does it work with AMD / Intel graphics?**
+HDR switching uses the normal Windows display functions, so it should – but it has not been tested yet. RTX Video HDR is NVIDIA only. Reports are very welcome.
 
 ## Reporting a problem
 
-Please include: Windows version, graphics card, monitor, what you did, what happened – and the log file (Settings › **Open log file**, or `%LocalAppData%\SmartHdrManager\log.txt`).
+Please open an [issue on GitHub](https://github.com/VantaCode420/SmartHdrManager/issues/new/choose) – the form asks for everything needed: app version, Windows version, graphics card and driver, monitor(s), what you did, what happened – and the log file (Settings › **Open log file**, or `%LocalAppData%\SmartHdrManager\log.txt`).
 
 ## Uninstall
 

@@ -120,7 +120,7 @@ namespace SmartHdrManager
         public bool VideoHdrInPlayers { get; set; } = true;
         // A video must play this long before HDR is switched on (ignores previews and short sounds)
         public int VideoHdrActivationSeconds { get; set; } = 2;
-        // After the video stops / pauses: wait this long before going back to SDR (0–30 s)
+        // After the video stops / pauses: wait this long before going back to SDR (0 s – 5 min, 30 s max before 2.5.2)
         public int VideoHdrRevertSeconds { get; set; } = 5;
         public bool VideoHdrDisableOnBattery { get; set; } = true;
         // While one of these programs runs, videos never switch HDR (a switch would disturb a recording/stream)
@@ -135,6 +135,10 @@ namespace SmartHdrManager
         public List<string> HdrPlayerPaths { get; set; } = new();
         // Marker the userscript adds to the tab title while an SDR video plays
         public string BrowserSdrVideoToken { get; set; } = "[sdr_video_active]";
+        // ---- v2.5.2 ----
+        // Learned launchers: launcher process -> the game process(es) it started (e.g. "redprelauncher" -> "witcher3").
+        // Filled automatically when a watched game closes within seconds and a program from the same folder takes over.
+        public Dictionary<string, List<string>> LauncherGames { get; set; } = new();
 
         // Full exe paths of programs added by hand or by hotkey (for their icons in the Games tab)
         public Dictionary<string, string> ProgramPaths { get; set; } = new();
@@ -173,6 +177,7 @@ namespace SmartHdrManager
         public string Source { get; set; } = string.Empty;      // Steam / Epic / GOG / Xbox / Ubisoft / EA app / Rockstar
         public List<string> Processes { get; set; } = new();    // process names (exe without .exe, lower case)
         public string? ExePath { get; set; }                    // main exe, used for the icon
+        public int ScanVersion { get; set; }                    // GameLibraryScanner.CurrentScanVersion when it was detected
     }
 
     /// <summary>
@@ -237,6 +242,35 @@ namespace SmartHdrManager
             {
                 CloseHandle(handle);
             }
+        }
+    }
+
+    /// <summary>The real Windows version for the log, e.g. "Windows 11 25H2 (build 26200.9711)".</summary>
+    public static class WindowsVersion
+    {
+        private static string? _cached;
+
+        public static string Describe()
+        {
+            if (_cached != null) return _cached;
+            string result;
+            try
+            {
+                using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+                string display = (key?.GetValue("DisplayVersion") as string ?? string.Empty).Trim();   // "25H2"
+                string buildText = (key?.GetValue("CurrentBuild") as string ?? string.Empty).Trim();   // "26200"
+                object? ubr = key?.GetValue("UBR");                                                        // 9711
+                int build = int.TryParse(buildText, out int b) ? b : Environment.OSVersion.Version.Build;
+                // "ProductName" still says "Windows 10" on Windows 11, so the build number decides
+                string name = build >= 22000 ? "Windows 11" : "Windows 10";
+                string fullBuild = ubr is int u ? $"{build}.{u}" : build.ToString();
+                result = display.Length > 0 ? $"{name} {display} (build {fullBuild})" : $"{name} (build {fullBuild})";
+            }
+            catch
+            {
+                result = $"Windows (build {Environment.OSVersion.Version.Build})";
+            }
+            return _cached = result;
         }
     }
 
@@ -795,7 +829,7 @@ namespace SmartHdrManager
         /// <summary>Which Windows HDR API is used (for the log).</summary>
         public static string HdrApiName => _hdrApi switch
         {
-            1 => "Windows 11 24H2+ HDR API",
+            1 => "modern HDR API (Windows 11 24H2 or newer)",
             0 => "classic advanced-colour API",
             _ => "not determined yet"
         };

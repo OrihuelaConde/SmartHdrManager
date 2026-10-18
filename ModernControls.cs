@@ -666,6 +666,22 @@ namespace SmartHdrManager
         public int Step { get; set; } = 1;
         [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public string? ZeroText { get; set; }   // e.g. "Off" instead of "0 s"
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+        public int[]? Stops { get; set; }       // optional fixed values (ascending): − / + jump to the previous / next one
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+        public Func<int, string>? Format { get; set; }   // optional display text, e.g. 120 -> "2 min"
+
+        private int NextValue(bool up)
+        {
+            if (Stops == null || Stops.Length == 0) return _current + (up ? Step : -Step);
+            if (up)
+            {
+                foreach (int v in Stops) if (v > _current) return v;
+                return Maximum;
+            }
+            for (int i = Stops.Length - 1; i >= 0; i--) if (Stops[i] < _current) return Stops[i];
+            return Minimum;
+        }
 
         public event EventHandler? ValueChanged;
 
@@ -737,7 +753,7 @@ namespace SmartHdrManager
         {
             Part released = HitTest(e.Location);
             if (e.Button == MouseButtons.Left && released == _pressed && IsEnabled(released))
-                Value = _current + (released == Part.Plus ? Step : -Step);
+                Value = NextValue(released == Part.Plus);
             _pressed = Part.None;
             Invalidate();
             base.OnMouseUp(e);
@@ -748,8 +764,8 @@ namespace SmartHdrManager
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
-            if (e.KeyCode is Keys.Left or Keys.Down) { Value = _current - Step; e.Handled = true; }
-            else if (e.KeyCode is Keys.Right or Keys.Up) { Value = _current + Step; e.Handled = true; }
+            if (e.KeyCode is Keys.Left or Keys.Down) { Value = NextValue(false); e.Handled = true; }
+            else if (e.KeyCode is Keys.Right or Keys.Up) { Value = NextValue(true); e.Handled = true; }
             base.OnKeyDown(e);
         }
 
@@ -767,7 +783,9 @@ namespace SmartHdrManager
             DrawPart(g, PlusRect, "+", Part.Plus);
 
             var valueRect = new Rectangle(Height, 0, Math.Max(0, Width - Height * 2), Height);
-            string text = _current == 0 && ZeroText != null ? ZeroText : _current + Suffix;
+            string text = _current == 0 && ZeroText != null ? ZeroText
+                : Format != null ? Format(_current)
+                : _current + Suffix;
             TextRenderer.DrawText(g, text, Theme.Semibold, valueRect, Enabled ? Theme.Text : Theme.Muted,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
 

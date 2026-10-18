@@ -33,7 +33,9 @@ namespace SmartHdrManager
             _showEvent = showEvent;
             _commands = commands;
 
-            _tray = new TrayAndStartupManager(ShowMain, SetPaused, Exit, SetOverride, GetOverride, () => Shortcut('O'));
+            _tray = new TrayAndStartupManager(ShowMain, SetPaused, Exit, SetOverride, GetOverride, () => Shortcut('O'),
+                                              () => _engine.OverrideMode == HdrOverride.None && !_engine.Paused ? _engine.VideoMenuState : 0,
+                                              _engine.SkipCurrentVideo, _engine.ResumeVideoHdr);
 
             ApplyHotkeys();
 
@@ -117,7 +119,8 @@ namespace SmartHdrManager
                 _hotkeys = new GlobalHotkeys(HotkeySettings.ModifierFlags(mode), _engine.HotkeyAddCurrent, _engine.HotkeyIgnoreCurrent, OnOverrideHotkey);
                 _engine.PollHotkeys = !_hotkeys.Registered;
                 _engine.PollOverrideHotkey = !_hotkeys.OverrideRegistered;
-                _engine.Log("INFO", $"Shortcuts: {Shortcut('H')} use HDR for the game in front, {Shortcut('I')} never HDR, {Shortcut('O')} HDR override.");
+                _engine.Log("INFO", $"Shortcuts: {Shortcut('H')} use HDR for the game in front, {Shortcut('I')} never HDR " +
+                                    $"(browser / video player in front: SDR for this video), {Shortcut('O')} HDR override.");
                 if (!_hotkeys.Registered)
                     _engine.Log("INFO", $"{Shortcut('H')} / {Shortcut('I')} are used by another program – using keyboard polling instead.");
                 if (!_hotkeys.OverrideRegistered)

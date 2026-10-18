@@ -217,7 +217,7 @@ namespace SmartHdrManager
         }
 
         /// <summary>The game's folder: the exe's folder, or its parent when the exe sits in a "bin\x64"-style subfolder.</summary>
-        private static string? GameFolder(string exePath)
+        internal static string? GameFolder(string exePath)
         {
             try
             {
@@ -241,7 +241,7 @@ namespace SmartHdrManager
             }
         }
 
-        private static HashSet<string> GameExeNames(string folder)
+        internal static HashSet<string> GameExeNames(string folder)
         {
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try

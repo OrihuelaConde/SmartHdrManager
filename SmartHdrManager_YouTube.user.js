@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Force & Detect True HDR for SmartHdrManager
 // @namespace    smarthdrmanager
-// @version      3.0
+// @version      3.1
 // @description  Marks the tab title while a video plays: " [real_hdr_active]" for real HDR YouTube videos, " [sdr_video_active]" for other videos (RTX Video HDR)
 // @match        *://*/*
 // @run-at       document-start
@@ -21,7 +21,8 @@
     const IS_YOUTUBE = /(^|\.)youtube\.com$/i.test(host);
     const IS_YOUTUBE_MUSIC = /^music\.youtube\.com$/i.test(host);   // music: never an SDR video tag
     const MIN_VIDEO_AREA = 0.25;                 // other sites: the video must cover a quarter of the window (no previews/ads)
-    const PAUSE_GRACE_MS = 60000;                // keep HDR during short pauses (avoids HDR/SDR flicker)
+    const PAUSE_GRACE_MS = 10 * 60000;           // a paused video keeps its tag this long while its tab is open and visible
+                                                 // (no HDR/SDR switch for a pause; leaving the video removes it at once)
     const FALLBACK_INTERVAL_MS = 1000;           // safety net; normal updates are event-driven
 
     // ---------------------------------------------------------------------
@@ -118,8 +119,9 @@
     }
 
     // c) Is the video playing? 1 = playing, 3 = buffering, 2 = paused, 0 = ended, -1 = unstarted, 5 = cued
-    //    HDR videos keep their tag during short pauses (avoids HDR/SDR flicker); SDR videos lose it at once
-    //    (SmartHdrManager waits its own "back to SDR" delay).
+    //    A paused video keeps its tag (HDR and SDR) while its tab is visible, for up to PAUSE_GRACE_MS: pausing does
+    //    not switch HDR off and on again. Ending the video, leaving it or hiding the tab removes the tag at once, then
+    //    SmartHdrManager waits its own "back to SDR after the video stops" delay.
     let lastPlayingAt = 0;
 
     function playbackState(player) {
@@ -130,7 +132,8 @@
             lastPlayingAt = Date.now();
             return 'playing';
         }
-        if (state === 2 && lastPlayingAt > 0 && Date.now() - lastPlayingAt < PAUSE_GRACE_MS) {
+        if (state === 2 && lastPlayingAt > 0 && Date.now() - lastPlayingAt < PAUSE_GRACE_MS &&
+            document.visibilityState === 'visible') {
             return 'paused';
         }
         return 'stopped';
@@ -153,20 +156,33 @@
         const playing = playingStreamIsHdr(player);
         const hdr = playing !== null ? playing : videoHasHdrFormats(player);
         if (hdr) return 'hdr';
-        return state === 'playing' && !IS_YOUTUBE_MUSIC ? 'sdr' : '';
+        return !IS_YOUTUBE_MUSIC ? 'sdr' : '';   // playing, or paused for a moment (see playbackState)
     }
 
-    // d) Any other site: a large, audible video that is playing (SDR; HDR cannot be detected reliably there)
+    // d) Any other site: a large, audible video that is playing (SDR; HDR cannot be detected reliably there).
+    //    Paused: keeps the tag like on YouTube while the tab is visible and the video played shortly before.
+    let genericLastPlayingAt = 0;
+
     function computeGenericTag() {
         const videos = document.getElementsByTagName('video');
         if (videos.length === 0) return '';
         const fs = document.fullscreenElement;
         const viewArea = Math.max(1, win.innerWidth * win.innerHeight);
+        let pausedBig = false;
         for (const v of videos) {
-            if (v.paused || v.ended || v.readyState < 2 || v.muted || v.volume === 0) continue;
+            if (v.ended || v.readyState < 2 || v.muted || v.volume === 0) continue;
             const r = v.getBoundingClientRect();
             const big = (fs && (fs === v || fs.contains(v))) || (r.width * r.height) / viewArea >= MIN_VIDEO_AREA;
-            if (big) return 'sdr';
+            if (!big) continue;
+            if (!v.paused) {
+                genericLastPlayingAt = Date.now();
+                return 'sdr';
+            }
+            if (v.currentTime > 0) pausedBig = true;
+        }
+        if (pausedBig && genericLastPlayingAt > 0 && Date.now() - genericLastPlayingAt < PAUSE_GRACE_MS &&
+            document.visibilityState === 'visible') {
+            return 'sdr';
         }
         return '';
     }

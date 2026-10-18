@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Win32;
 
 namespace SmartHdrManager
@@ -46,9 +47,24 @@ namespace SmartHdrManager
         public bool IsBrowser { get; init; }
         public bool Reported { get; init; }                   // marked by the browser script: certainly a playing video
         public string Source { get; init; } = string.Empty;   // for the log
+        public string Title { get; init; } = string.Empty;    // window title (tab title / file name in the player)
 
         /// <summary>Same window, same kind of video, same monitor = same playback (for the activation delay).</summary>
         public string Key => $"{Hwnd.ToInt64():X}|{Kind}|{Monitor.ToInt64():X}";
+
+        /// <summary>
+        /// Which video it is: the window title without the script markers and without YouTube's "(3) " notification
+        /// count. Changes when the next video starts (new tab title / next file in the player).
+        /// </summary>
+        public string VideoName
+        {
+            get
+            {
+                string t = Regex.Replace(Title, @"\s*\[(real_hdr_active|sdr_video_active)\]", string.Empty, RegexOptions.IgnoreCase);
+                t = Regex.Replace(t, @"^\(\d+\+?\)\s*", string.Empty);
+                return t.Trim();
+            }
+        }
 
         public string Describe() =>
             $"{(Kind == VideoKind.Hdr ? "HDR" : "SDR")} video in {Process}{(Fullscreen ? " (full screen)" : "")} – {Source}";
@@ -168,7 +184,8 @@ namespace SmartHdrManager
                     Foreground = w.Hwnd == foreground,
                     IsBrowser = w.IsBrowser,
                     Reported = reported,
-                    Source = source
+                    Source = source,
+                    Title = w.Title   // always set (GetWindowText result) – a "?? " here made the compiler warn above
                 };
                 if (best == null || Rank(candidate) > Rank(best)) best = candidate;
             }

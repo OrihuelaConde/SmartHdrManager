@@ -71,7 +71,13 @@ namespace SmartHdrManager
         private static readonly string[] VideoTriggerModes = { VideoTriggers.Fullscreen, VideoTriggers.Any };
         private readonly ToggleSwitch _swVideoBrowsers = new();
         private readonly ToggleSwitch _swVideoPlayers = new();
-        private readonly Stepper _videoRevert = new() { Minimum = 0, Maximum = 30 };
+        // 0 s … 5 min: small steps first, then 1 / 2 / 3 / 5 minutes (keeps HDR through a pause)
+        private readonly Stepper _videoRevert = new()
+        {
+            Minimum = 0, Maximum = HdrEngine.MaxVideoRevertSeconds,
+            Stops = new[] { 0, 1, 2, 3, 5, 10, 15, 20, 30, 60, 120, 180, 300 },
+            Format = v => v >= 60 && v % 60 == 0 ? $"{v / 60} min" : $"{v} s"
+        };
         private readonly ToggleSwitch _swVideoBattery = new();
 
         // Log page
@@ -362,7 +368,7 @@ namespace SmartHdrManager
             Section("General", "Startup and keyboard shortcuts.", first: true);
             Add(SettingRow("Start with Windows", "Starts minimized in the system tray when you sign in.", _swAutostart), 68);
             Add(SettingRow("Scan drives automatically", "Looks for newly installed games at startup, at most once a week.", _swStartupScan), 68);
-            Add(SettingRow("Keyboard shortcuts", "Modifier + H: HDR for the game in front  ·  + I: never HDR  ·  + O: override", _hotkeyChoice), 68);
+            Add(SettingRow("Keyboard shortcuts", "Modifier + H: HDR for the game in front  ·  + I: never HDR (on a video: SDR for this video)  ·  + O: override", _hotkeyChoice), 68);
 
             // ---- Monitors ----
             var monitors = _engine.GetMonitors();
@@ -413,7 +419,7 @@ namespace SmartHdrManager
             Detail(SettingRow("When", "Full screen only avoids switching for small players.", _videoTrigger), 68);
             Detail(SettingRow("Web browsers", "Chrome, Edge, Brave, Firefox · uses the userscript.", _swVideoBrowsers), 68);
             Detail(SettingRow("Video players", "Players started normally. For RTX Video HDR, the Videos tab works better.", _swVideoPlayers), 68);
-            Detail(SettingRow("Back to SDR after the video stops", "Avoids black screens when skipping through a playlist.", _videoRevert), 68);
+            Detail(SettingRow("Back to SDR after the video stops", "Longer = no switch when you pause for a moment or skip through a playlist.", _videoRevert), 68);
             Detail(SettingRow("Turn off on battery power", "Laptops: no video HDR while unplugged.", _swVideoBattery), 68);
 
             var videoCard = new RoundedPanel { Radius = 10, BackColor = Theme.Surface, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8), Padding = new Padding(16, 12, 16, 12) };
@@ -422,7 +428,8 @@ namespace SmartHdrManager
                 Dock = DockStyle.Fill, Font = Theme.Small, ForeColor = Theme.Muted,
                 Text = RtxVideoStatus.Query().Describe() + " Only the monitor with the video is switched. " +
                        "Games always come first, and videos never switch HDR while OBS is running. " +
-                       "\"HDR only\": SDR videos stay in SDR. \"Always\": every video switches to HDR."
+                       "\"HDR only\": SDR videos stay in SDR. \"Always\": every video switches to HDR. " +
+                       "One video should stay in SDR? Tray menu › SDR for this video."
             });
             Detail(videoCard, 116);
 
@@ -498,7 +505,7 @@ namespace SmartHdrManager
             const string url = "https://github.com/VantaCode420/SmartHdrManager#browser-script-needed-for-youtube-hdr-and-browser-videos";
             try
             {
-                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true })?.Dispose();
             }
             catch
             {
@@ -791,9 +798,13 @@ namespace SmartHdrManager
             {
                 detail = $"HDR game running: {s.RunningGame}";
             }
+            else if (s.FollowingLauncher != null)
+            {
+                detail = $"{s.FollowingLauncher} closed · waiting for the game it starts …";
+            }
             else if (s.Video != null)
             {
-                detail = s.HoldSecondsLeft > 0 ? $"Video stopped · back to SDR in {s.HoldSecondsLeft} s" : $"Playing: {s.Video}";
+                detail = s.HoldSecondsLeft > 0 ? $"Video stopped · back to SDR in {FormatSeconds(s.HoldSecondsLeft)}" : $"Playing: {s.Video}";
             }
             else if (s.HoldSecondsLeft > 0)
             {
@@ -826,6 +837,10 @@ namespace SmartHdrManager
         // ------------------------------------------------------------------
         // Games page
         // ------------------------------------------------------------------
+        /// <summary>45 -> "45 s", 299 -> "4:59 min" (long video delays since 2.5.2).</summary>
+        private static string FormatSeconds(int seconds) =>
+            seconds < 60 ? $"{seconds} s" : $"{seconds / 60}:{seconds % 60:00} min";
+
         private void RebuildGames()
         {
             string filter = _search.Text.Trim();
@@ -1425,7 +1440,7 @@ namespace SmartHdrManager
             try
             {
                 if (!File.Exists(path)) { MessageBox.Show(this, "File does not exist yet:\n" + path, Text); return; }
-                Process.Start(new ProcessStartInfo("notepad.exe", $"\"{path}\"") { UseShellExecute = true });
+                Process.Start(new ProcessStartInfo("notepad.exe", $"\"{path}\"") { UseShellExecute = true })?.Dispose();
             }
             catch (Exception ex)
             {
