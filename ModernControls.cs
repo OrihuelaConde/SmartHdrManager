@@ -383,9 +383,26 @@ namespace SmartHdrManager
             set { _glyph = value; UpdateAutoSize(); Invalidate(); }
         }
 
+        /// <summary>
+        /// AutoSize: the button is at least as wide as this text needs (the longest text it can show), so it keeps its
+        /// width when the text changes. Layout engines only use the preferred size – MinimumSize is not enough.
+        /// </summary>
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+        public string? SizingText
+        {
+            get => _sizingText;
+            set { _sizingText = value; UpdateAutoSize(); Invalidate(); }
+        }
+        private string? _sizingText;
+
         public override Size GetPreferredSize(Size proposedSize)
         {
             Size text = string.IsNullOrEmpty(Text) ? Size.Empty : TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.NoPadding);
+            if (!string.IsNullOrEmpty(_sizingText))
+            {
+                Size sizing = TextRenderer.MeasureText(_sizingText, Font, Size.Empty, TextFormatFlags.NoPadding);
+                if (sizing.Width > text.Width) text = new Size(sizing.Width, Math.Max(text.Height, sizing.Height));
+            }
             int glyphWidth = string.IsNullOrEmpty(_glyph) ? 0 : Font.Height + (text.Width > 0 ? Font.Height / 3 : 0);
             int padding = Font.Height;
             int width = Math.Max(Font.Height * 2 + 4, text.Width + glyphWidth + padding * 2);

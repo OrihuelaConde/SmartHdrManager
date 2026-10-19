@@ -12,8 +12,8 @@ body:
     id: app-version
     attributes:
       label: App version
-      description: From the zip name, or right-click SmartHdrManager.exe › Properties › Details
-      placeholder: "2.5.2"
+      description: Settings › Updates shows it (or right-click SmartHdrManager.exe › Properties › Details)
+      placeholder: "2.6.0"
     validations:
       required: true
   - type: input

@@ -22,6 +22,7 @@ namespace SmartHdrManager
         // (missing in files from 2.5.0 and older = 0).
         public int ConfigVersion { get; set; } = 0;
 
+        // 2.5: on/off for the weekly scan. 2.6 uses DriveScanIntervalDays (this one is kept in step for older versions).
         public bool AutoScanDrivesOnStartup { get; set; } = true;
 
         // Only toggle HDR on the primary monitor (main display at desktop coordinates 0,0)
@@ -139,6 +140,23 @@ namespace SmartHdrManager
         // Learned launchers: launcher process -> the game process(es) it started (e.g. "redprelauncher" -> "witcher3").
         // Filled automatically when a watched game closes within seconds and a program from the same folder takes over.
         public Dictionary<string, List<string>> LauncherGames { get; set; } = new();
+
+        // ---- v2.6 ----
+        // Apps tab: every program that is not a game but that the app reacts to – process name -> category and mode.
+        // Replaces Browsers, LocalVideoPlayers, ForceSdrApps, VideoHdrBlockingApps and NoHdrWhileObsRunning, which are
+        // still written (for older versions) but no longer read.
+        public Dictionary<string, AppRule> AppRules { get; set; } = AppCatalog.DefaultRules();
+        // Off (default): the app only switches back HDR that it turned on itself; HDR turned on by you or another
+        // program is left alone. On: the 2.5 behaviour – back to SDR whenever nothing in the lists needs HDR.
+        public bool KeepDesktopSdr { get; set; } = false;
+        // Automatic drive scan for newly installed games: -1 = off, 0 = at every start, N = every N days (default weekly)
+        public int DriveScanIntervalDays { get; set; } = 7;
+        // Look for a new version on GitHub once a week. Off by default: no internet connection unless asked for.
+        public bool CheckForUpdatesAutomatically { get; set; } = false;
+        public DateTime? LastUpdateCheckUtc { get; set; }
+        public string? LastNotifiedVersion { get; set; }          // the automatic check mentions each version only once
+        // Games that closed within seconds after HDR was switched on for them (possible crash, e.g. with NVIDIA RTX HDR)
+        public Dictionary<string, int> QuickExitCounts { get; set; } = new();
 
         // Full exe paths of programs added by hand or by hotkey (for their icons in the Games tab)
         public Dictionary<string, string> ProgramPaths { get; set; } = new();

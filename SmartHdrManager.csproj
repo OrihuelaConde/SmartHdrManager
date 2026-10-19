@@ -14,7 +14,7 @@
     <PlatformTarget Condition="'$(RuntimeIdentifier)' == 'win-arm64'">ARM64</PlatformTarget>
     <RootNamespace>SmartHdrManager</RootNamespace>
     <AssemblyName>SmartHdrManager</AssemblyName>
-    <Version>2.5.2</Version>
+    <Version>2.6.0</Version>
     <!-- Shown in the exe's Properties › Details -->
     <Product>Smart HDR Manager</Product>
     <Authors>VantaCode420</Authors>
@@ -30,5 +30,11 @@
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
+
+  <!-- "Check for updates" picks the package that fits this copy: standalone (self-contained) or the small one -->
+  <ItemGroup>
+    <AssemblyMetadata Include="BuildFlavor" Value="standalone" Condition="'$(SelfContained)' == 'true'" />
+    <AssemblyMetadata Include="BuildFlavor" Value="small" Condition="'$(SelfContained)' != 'true'" />
+  </ItemGroup>
 
 </Project>

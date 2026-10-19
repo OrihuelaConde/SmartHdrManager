@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -23,11 +24,16 @@ namespace SmartHdrManager
 
         private MainForm? _form;
         private long _formHiddenAt;
-        private bool _balloonShown;
         private bool _exiting;
         private string _lastTooltip = string.Empty;
 
-        public TrayAppContext(HdrEngine engine, EventWaitHandle showEvent, CommandEvents commands, CliCommand startCommand, bool startHidden)
+        // Weekly update check (Settings › Updates, off by default): first look a minute after the start
+        private const int UpdateCheckEveryMs = 6 * 3600 * 1000;
+        private long _nextUpdateCheckMs = Environment.TickCount64 + 60000;
+        private bool _updateCheckRunning;
+
+        public TrayAppContext(HdrEngine engine, EventWaitHandle showEvent, CommandEvents commands, CliCommand startCommand, bool startHidden,
+                              bool justUpdated)
         {
             _engine = engine;
             _showEvent = showEvent;
@@ -54,6 +60,15 @@ namespace SmartHdrManager
                 VideoPlayers.RefreshContextMenu(exe) + VideoPlayers.RefreshAppRegistrations(exe) > 0)
                 _engine.Log("INFO", "\"Play with HDR\" entries pointed to an old location – updated to this exe.");
             if (startCommand != CliCommand.None) RunCommand(startCommand);
+
+            // After "Check for updates › Update now": remove the old exe, say what happened
+            Updater.CleanUp();
+            if (justUpdated)
+            {
+                _engine.Log("UPDATE", $"Updated to version {Updater.CurrentVersionText}.");
+                _tray.ShowBalloon("Smart HDR Manager updated", $"Now running version {Updater.CurrentVersionText}. What's new: CHANGELOG.md next to the app.");
+            }
+
             if (!startHidden) ShowMain();
         }
 
@@ -88,7 +103,7 @@ namespace SmartHdrManager
             if (_exiting) return;
             if (_form == null || _form.IsDisposed)
             {
-                _form = new MainForm(_engine, SetPaused, SetOverride, ApplyHotkeys);
+                _form = new MainForm(_engine, SetPaused, SetOverride, ApplyHotkeys, Exit);
                 _form.HiddenToTray += OnFormHidden;
             }
             _form.ShowFromTray();
@@ -160,13 +175,8 @@ namespace SmartHdrManager
             if (_form != null && !_form.IsDisposed && _form.Visible) _form.RefreshView();
         }
 
-        private void OnFormHidden(object? sender, EventArgs e)
-        {
-            _formHiddenAt = Environment.TickCount64;
-            if (_balloonShown) return;
-            _balloonShown = true;
-            _tray.ShowBalloon("Smart HDR Manager", "Still running in the system tray. Click the icon to open it again.");
-        }
+        // No notification when the window goes to the tray (2.6): the tray icon itself shows that the app still runs
+        private void OnFormHidden(object? sender, EventArgs e) => _formHiddenAt = Environment.TickCount64;
 
         private void SetPaused(bool paused)
         {
@@ -183,7 +193,7 @@ namespace SmartHdrManager
             if (e.Mode == PowerModes.Resume)
             {
                 _engine.Log("INFO", "Resumed from sleep – re-checking the HDR state.");
-                _engine.InvalidateHdrState();
+                _engine.InvalidateHdrState(resumed: true);
             }
         }
 
@@ -207,6 +217,17 @@ namespace SmartHdrManager
                     _engine.HoldHdrForLaunch();
             }
             if (_commands.TakeLaunchRelease()) _engine.ReleaseLaunchHold();   // the game / player was closed
+
+            // Notifications from the engine (crash hint)
+            while (_engine.TryTakeNotification(out string noteTitle, out string noteText))
+                _tray.ShowBalloon(noteTitle, noteText);
+
+            // Weekly update check, only if turned on (Settings › Updates)
+            if (Environment.TickCount64 >= _nextUpdateCheckMs)
+            {
+                _nextUpdateCheckMs = Environment.TickCount64 + UpdateCheckEveryMs;
+                _ = AutoCheckForUpdateAsync();
+            }
 
             // Only does anything if the app was built as a console exe (see ConsoleWindowHider)
             ConsoleWindowHider.HideIfMinimized();
@@ -240,6 +261,44 @@ namespace SmartHdrManager
                 form.HiddenToTray -= OnFormHidden;
                 form.AllowExit();
                 form.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// "Check for updates automatically": at most once a week, only a notification – nothing is downloaded or
+        /// installed without you (Settings › Updates › Check for updates). Each new version is mentioned once.
+        /// </summary>
+        private async Task AutoCheckForUpdateAsync()
+        {
+            if (_updateCheckRunning || _exiting) return;
+            bool enabled = _engine.Read(c => c.CheckForUpdatesAutomatically);
+            DateTime? last = _engine.Read(c => c.LastUpdateCheckUtc);
+            if (!enabled || (last != null && DateTime.UtcNow - last.Value < TimeSpan.FromDays(7))) return;
+
+            _updateCheckRunning = true;
+            try
+            {
+                var info = await Updater.CheckAsync(CancellationToken.None);
+                _engine.Update(c => c.LastUpdateCheckUtc = DateTime.UtcNow);
+                if (!info.IsNewer)
+                {
+                    _engine.Log("UPDATE", $"Weekly check: {Updater.CurrentVersionText} is the latest version.");
+                    return;
+                }
+                bool alreadyMentioned = string.Equals(_engine.Read(c => c.LastNotifiedVersion), info.VersionText, StringComparison.OrdinalIgnoreCase);
+                _engine.Log("UPDATE", $"Weekly check: version {info.VersionText} is available (Settings › Updates › Check for updates).");
+                if (alreadyMentioned || _exiting) return;
+                _engine.Update(c => c.LastNotifiedVersion = info.VersionText);
+                _tray.ShowBalloon($"Smart HDR Manager {info.VersionText} is available",
+                    "Open the app › Settings › Updates › Check for updates to install it.");
+            }
+            catch (Exception ex)
+            {
+                _engine.Log("UPDATE", $"Weekly update check failed: {ex.Message}");
+            }
+            finally
+            {
+                _updateCheckRunning = false;
             }
         }
 
@@ -346,6 +405,35 @@ namespace SmartHdrManager
             try { SetCurrentProcessExplicitAppUserModelID(id); } catch { }   // cosmetic only
         }
 
+        /// <summary>
+        /// Windows shows the app identity as the sender of notifications. Without a registered name that is the raw
+        /// id ("VantaCode420.SmartHdrManager"); this gives it the name "Smart HDR Manager" and the app icon.
+        /// Per user (HKCU), no administrator rights. Removed by hand only (see README › Uninstall).
+        /// </summary>
+        private static void RegisterNotificationName()
+        {
+            try
+            {
+                string iconPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(HdrEngine.LogPath)!, "app.ico");
+                try
+                {
+                    System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(iconPath)!);
+                    if (!System.IO.File.Exists(iconPath))
+                    {
+                        using var icon = AppIcons.Create(IconStyle.Vivid, 64);
+                        using var file = System.IO.File.Create(iconPath);
+                        icon.Save(file);
+                    }
+                }
+                catch { iconPath = string.Empty; }
+
+                using var key = Registry.CurrentUser.CreateSubKey($@"Software\Classes\AppUserModelId\{AppUserModelId}");
+                key.SetValue("DisplayName", "Smart HDR Manager");
+                if (iconPath.Length > 0) key.SetValue("IconUri", iconPath);
+            }
+            catch { }   // cosmetic only
+        }
+
         [STAThread]
         private static void Main(string[] args)
         {
@@ -370,6 +458,13 @@ namespace SmartHdrManager
             using var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\SmartHdrManager.ShowWindow");
             using var commands = new CommandEvents();
             using var mutex = new Mutex(true, @"Local\SmartHdrManager.SingleInstance", out bool isFirstInstance);
+            // Started by "Check for updates › Update now": the old version is still closing – wait for it (up to 30 s)
+            bool justUpdated = args.Any(a => a.Equals("--updated", StringComparison.OrdinalIgnoreCase));
+            if (!isFirstInstance && justUpdated)
+            {
+                try { isFirstInstance = mutex.WaitOne(TimeSpan.FromSeconds(30)); }
+                catch (AbandonedMutexException) { isFirstInstance = true; }   // the old version has exited: the mutex is ours
+            }
             if (!isFirstInstance)
             {
                 if (command != CliCommand.None) commands.Signal(command);   // the running instance applies it
@@ -380,6 +475,8 @@ namespace SmartHdrManager
             Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);   // physical pixels: needed for the fullscreen check
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            // Only after the DPI mode is set: it draws the app icon, and the first drawing call fixes the process DPI mode
+            RegisterNotificationName();
 
             // Errors must never pop up dialogs or vanish silently while the app lives in the tray: write them to the log file.
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
@@ -391,7 +488,7 @@ namespace SmartHdrManager
                 ConsoleWindowHider.HideCompletely();
 
             var engine = new HdrEngine();
-            using var context = new TrayAppContext(engine, showEvent, commands, command, startHidden);
+            using var context = new TrayAppContext(engine, showEvent, commands, command, startHidden, justUpdated);
             Application.Run(context);
         }
     }

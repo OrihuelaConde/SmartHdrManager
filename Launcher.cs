@@ -35,7 +35,7 @@ namespace SmartHdrManager
         private const int StubGraceMs = 15000;        // … so look a little longer for the real game it started
 
         /// <param name="videoPlayer">
-        /// --launch-video (Videos tab): the program is a video player. HDR ends as soon as its window is closed –
+        /// --launch-video (Apps tab › Video players): the program is a video player. HDR ends as soon as its window is closed –
         /// players like MPC-HC keep running for several seconds after that while they shut down.
         /// </param>
         public static int Run(string[] args, int launchIndex, bool videoPlayer = false)
@@ -290,10 +290,10 @@ namespace SmartHdrManager
             long nextSignal = SignalIntervalMs;
             while (sw.ElapsedMilliseconds < WaitForHdrMs)
             {
-                // The tray app refuses while it is paused, SDR is forced or "No HDR while OBS is running" applies
+                // The tray app refuses while it is paused, SDR is forced or a recording app set to "No HDR" runs
                 if (refused.WaitOne(200))
                 {
-                    Log("Launch with HDR: the tray app keeps SDR right now (paused, SDR forced or OBS running) – starting without HDR.");
+                    Log("Launch with HDR: the tray app keeps SDR right now (paused, SDR forced or a recording app set to No HDR is running) – starting without HDR.");
                     return false;
                 }
                 if (HdrController.QueryHdrState(filter, out _, out bool allOn) && allOn) return true;

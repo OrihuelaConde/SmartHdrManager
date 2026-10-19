@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.6.0 – 2026-10
+
+### Changed
+- **The app only undoes what it did itself.** HDR that you turned on (Win+Alt+B, Windows Settings) or that another program turned on (madVR / MPC, a game's own HDR option, another tool) is no longer switched back to SDR – also HDR that was already on when the app started. If you turn HDR off while a game from your list runs, the app no longer turns it back on a moment later: it waits until that game ends or the next game / video starts. HDR lost through a display reconnect or wake-up is still switched on again. A full-screen game that switched HDR on by itself is still switched back once it closes. *Settings › Switching back to SDR › Keep the desktop in SDR* brings back the old behaviour.
+- **Apps tab** (was: Videos tab): every program the app reacts to that is not a game, found automatically, with one mode each – **programs that are not listed are never touched**.
+  - Video players: *Auto* (as set in Settings › Videos) / *HDR only* / *Off* (the player handles HDR itself, e.g. madVR). *Default app…* and *More* (start with HDR) as before.
+  - Web browsers: *Auto* / *HDR only* / *Off* (Opera and Vivaldi are now recognised too).
+  - Creative apps: on = SDR while in front (Photoshop, Lightroom, Premiere Pro, After Effects, DaVinci Resolve; also listed when installed, switched off: Illustrator, Media Encoder, Capture One, Krita). HDR that you had on comes back on afterwards.
+  - Recording & streaming: an on/off switch per app – on = no HDR while it runs (replaces "No HDR while OBS is running"; HDR you had on comes back afterwards), off by default. OBS no longer keeps videos in SDR on its own – switch it on when you record.
+  - Programs can be added to every group. The lists in config.json are moved over automatically (also names you added by hand).
+- **Look for new games** (was: Scan drives automatically) is now a choice: Off / each start / daily / weekly (default) / monthly – and it is also checked while the app runs, not only at startup.
+- The minimize button next to *Pause automation* is gone; minimizing the window now hides it straight to the tray (no flash, no "still running" notification).
+- Notifications show "Smart HDR Manager" as the sender (was "VantaCode420.SmartHdrManager").
+- Shorter, clearer descriptions in all tabs; some settings renamed (e.g. *Wait before switching back*, *HDR for videos*).
+
+### New
+- **Check for updates** (Settings › Updates): shows the release notes and installs the new version with one click – the right package for your copy (x64 / ARM64, standalone / small), checked against the release's SHA256SUMS before anything is replaced; settings are kept. Optional weekly check (off by default) – only a notification. No internet connection otherwise.
+- **Crash hint:** a game from your list that closes within a few seconds after HDR came on gets a `HINT` in the log; the second time also a notification and a hint in its Options. Most likely cause: NVIDIA RTX HDR for games – turn it off (*NVIDIA App › Graphics › Global Settings › RTX HDR*), or use *Launch with HDR* (HDR on before the game starts). The hint disappears once the game runs normally.
+- HDR changes by someone else are recognised sooner (right after the app's own switch has been confirmed, instead of after 8 s).
+- Programs added by hand in the Apps tab have a *Remove* button.
+
 ## 2.5.2 – 2026-10
 
 ### Fixed

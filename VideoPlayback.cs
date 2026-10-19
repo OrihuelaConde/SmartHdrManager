@@ -78,6 +78,7 @@ namespace SmartHdrManager
         public bool IncludePlayers { get; init; }
         public bool FullscreenOnly { get; init; }
         public bool AllowSdr { get; init; }
+        public ICollection<string> HdrOnly { get; init; } = Array.Empty<string>();   // Apps tab: "only HDR videos"
         public string HdrToken { get; init; } = string.Empty;
         public string SdrToken { get; init; } = string.Empty;
         public string[] HdrKeywords { get; init; } = Array.Empty<string>();
@@ -172,7 +173,7 @@ namespace SmartHdrManager
                 }
 
                 if (kind == null) continue;
-                if (kind == VideoKind.Sdr && !o.AllowSdr) continue;
+                if (kind == VideoKind.Sdr && (!o.AllowSdr || o.HdrOnly.Contains(w.Process))) continue;
 
                 var candidate = new VideoCandidate
                 {
