@@ -31,11 +31,8 @@ namespace SmartHdrManager
         // Extra folders to search for games (the common Steam / Epic / GOG / Xbox / "Games" folders are found automatically)
         public List<string> CustomGameFolders { get; set; } = new();
 
-        public List<string> IgnoredGames { get; set; } = new()
-        {
-            "cs2",
-            "valorant"
-        };
+        // "Never HDR" (Games tab). Empty by default since 2.6.1 (2.6.0 and older shipped cs2 and valorant here).
+        public List<string> IgnoredGames { get; set; } = new();
 
         // Active HDR list: Only games in this list will automatically trigger HDR (empty: the user picks the games)
         public List<string> HdrGamesAndApps { get; set; } = new();

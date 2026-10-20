@@ -850,6 +850,7 @@ namespace SmartHdrManager
             ExePath = row.ExePath;
             Hdr = row.Hdr;
             HasOptions = row.HasOptions;
+            Excluded = row.Excluded;
         }
 
         public string Key { get; }
@@ -859,6 +860,7 @@ namespace SmartHdrManager
         public string? ExePath { get; }
         public bool Hdr { get; set; }
         public bool HasOptions { get; set; }
+        public bool Excluded { get; }      // "Never HDR" row (only shown while searching)
         public override string ToString() => Name;
     }
 

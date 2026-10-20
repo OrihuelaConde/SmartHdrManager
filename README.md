@@ -2,7 +2,7 @@
 
 Turns Windows HDR on automatically when you need it – HDR games, HDR videos on YouTube, local videos in your video player (including SDR videos with NVIDIA RTX Video HDR) – and back to SDR when you are done. It lives in the system tray.
 
-**New in 2.6:** the app only switches back HDR that it turned on itself – HDR you (or madVR, a game, another tool) turned on stays on. New **Apps** tab: one mode per video player, browser, creative app and recording app – programs that are not listed are never touched. **Check for updates** with one-click install, a hint when a game closes right after HDR came on (e.g. a crash with NVIDIA RTX HDR), and a choice how often the app looks for new games. **2.5.2:** games with a launcher (The Witcher 3 from GOG, …), HDR stays on while a video is paused, *SDR for this video*. See [CHANGELOG.md](CHANGELOG.md).
+**New in 2.6:** the app only switches back HDR that it turned on itself – HDR you (or madVR, a game, another tool) turned on stays on. New **Apps** tab: one mode per video player, browser, creative app and recording app – programs that are not listed are never touched. **Check for updates** with one-click install, a hint when a game closes right after HDR came on (e.g. a crash with NVIDIA RTX HDR), and a choice how often the app looks for new games. **2.6.1:** games set to *Never HDR* can be restored (Settings › General › Never HDR games); cs2 and valorant are no longer excluded by default. **2.5.2:** games with a launcher (The Witcher 3 from GOG, …), HDR stays on while a video is paused, *SDR for this video*. See [CHANGELOG.md](CHANGELOG.md).
 
    ![Smart HDR Manager main window](docs/main.png)
 
@@ -51,11 +51,11 @@ Settings are stored in `%AppData%\SmartHdrManager\config.json`, the log in `%Loc
 
 When the content ends, the app waits a few seconds (Settings › Back to SDR › *Wait before switching back*) and switches back to SDR. When you exit the app, it switches back to SDR if it turned HDR on (HDR that was already on, or a game that is still running, is left alone).
 
-**The app only undoes what it did itself** (2.6). HDR that you turn on (Win+Alt+B, Windows Settings) or that another program turns on (madVR / MPC, a game's own HDR option, another tool) is never switched back to SDR – and if you turn HDR *off* while a game from your list runs, the app does not turn it on again until that game ends or the next game / video starts. Exceptions you chose yourself: a creative app set to SDR, or a recording app set to *No HDR* – afterwards HDR comes back on if it was on before. A full-screen game that switched HDR on by itself is switched back once it closes (some games leave HDR on). Want the old behaviour (always back to SDR when nothing in your lists needs HDR)? *Settings › Back to SDR › Keep the desktop in SDR*.
+**The app only undoes what it did itself** (2.6). HDR that you turn on (Win+Alt+B, Windows Settings) or that another program turns on (madVR / MPC, a game's own HDR option, another tool) is never switched back to SDR – and if you turn HDR *off* while a game from your list runs, the app does not turn it on again until that game ends or the next game / video starts. Exceptions you chose yourself: a creative app set to SDR, or a recording app switched on in the Apps tab – afterwards HDR comes back on if it was on before. A full-screen game that switched HDR on by itself is switched back once it closes (some games leave HDR on). Want the old behaviour (always back to SDR when nothing in your lists needs HDR)? *Settings › Back to SDR › Keep the desktop in SDR*.
 
 **Games with a launcher** (REDprelauncher, PlayGTAV, …): if a game in your list closes within a few seconds, the app keeps HDR on and waits up to 45 s for the real game from the same folder, follows it and remembers it – next time HDR switches straight away. The log says "Following '…' (started by '…')". Libraries that register a launcher instead of the game (e.g. The Witcher 3 from GOG) are detected correctly since 2.5.2.
 
-**Games tab:** **Scan games** re-reads the game libraries and your drives. **Add program** / **Add running** adds any other program. **Options** sets a per-game delay before HDR (for games that crash or flicker if HDR switches during startup), how long HDR stays on after the game closes, and **Launch with HDR** (see below). **Never HDR** removes a game for good.
+**Games tab:** **Scan games** re-reads the game libraries and your drives. **Add program** / **Add running** adds any other program. **Options** sets a per-game delay before HDR (for games that crash or flicker if HDR switches during startup), how long HDR stays on after the game closes, and **Launch with HDR** (see below). **Never HDR** hides a game and never uses HDR for it – undo it in *Settings › General › Never HDR games*, or search for the game in the Games tab and turn it on again.
 
 **Tray menu:** open the window, **SDR for this video** (only shown while a video uses HDR: back to SDR until that video stops – the next video switches as usual; *HDR for videos again* ends it early), pause automation, **HDR override** (force HDR on or SDR for a while), exit.
 
@@ -245,7 +245,7 @@ Settings › Videos / RTX Video HDR: set *Which videos* to **HDR only** (SDR vid
 Tray menu › **SDR for this video**, or `+ I` (Win+Alt+I by default) while the browser / player is in front.
 
 **I turned HDR on myself – will the app switch it off?**
-No (since 2.6). The app only switches back HDR that it turned on itself. Exceptions are the ones you set up: a creative app set to SDR, or a recording app set to *No HDR* – and then HDR comes back on afterwards.
+No (since 2.6). The app only switches back HDR that it turned on itself. Exceptions are the ones you set up: a creative app set to SDR, or a recording app switched on in the Apps tab – and then HDR comes back on afterwards.
 
 **My video player (madVR, MPC-BE, mpv …) switches HDR by itself.**
 Set the player to **Off** in the Apps tab – the app then leaves it completely alone.

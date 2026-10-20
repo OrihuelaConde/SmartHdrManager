@@ -40,6 +40,7 @@ namespace SmartHdrManager
         public string? ExePath { get; init; }
         public bool Hdr { get; init; }
         public bool HasOptions { get; init; }
+        public bool Excluded { get; init; }                     // "Never HDR" (2.6.1: shown again so it can be undone)
     }
 
     /// <summary>
@@ -435,7 +436,7 @@ namespace SmartHdrManager
         // ------------------------------------------------------------------
         // One-time fixes of default lists in existing config.json files (AppConfig.ConfigVersion)
         // ------------------------------------------------------------------
-        private const int CurrentConfigVersion = 4;
+        private const int CurrentConfigVersion = 5;
 
         private void UpgradeConfig(AppConfig c)
         {
@@ -487,6 +488,15 @@ namespace SmartHdrManager
                 if (existingFile)
                     Log("CONFIG", $"Program lists moved to the new Apps tab ({rules.Count} programs). " +
                                   "New: HDR that you or another program turned on is no longer switched back to SDR.");
+            }
+
+            if (c.ConfigVersion < 5)
+            {
+                // 2.6.1: cs2 and valorant were shipped as "Never HDR" examples – the user never chose them, and since
+                // the list was hidden they could not be undone. Remove the examples (the user can exclude them again).
+                foreach (string example in new[] { "cs2", "valorant" })
+                    if ((c.IgnoredGames?.RemoveAll(n => string.Equals(n, example, StringComparison.OrdinalIgnoreCase)) ?? 0) > 0 && existingFile)
+                        Log("CONFIG", $"Removed the example entry '{example}' from the \"Never HDR\" games.");
             }
 
             c.ConfigVersion = CurrentConfigVersion;
@@ -2654,8 +2664,9 @@ namespace SmartHdrManager
         /// <summary>
         /// Rows for the Games tab: every library game (real name, source, icon), then programs that are not in a
         /// library: always the HDR-enabled ones, and the drive-scan results when includeOthers is set.
+        /// includeExcluded adds the "Never HDR" games (marked Excluded), e.g. while searching.
         /// </summary>
-        public List<GameRow> GetGameRows(bool includeOthers)
+        public List<GameRow> GetGameRows(bool includeOthers, bool includeExcluded = false)
         {
             lock (Sync)
             {
@@ -2708,8 +2719,73 @@ namespace SmartHdrManager
                     });
                 }
 
+                if (includeExcluded)
+                    rows.AddRange(GetExcludedRows());
+
                 return rows.OrderBy(r => r.Name, Cmp).ToList();
             }
+        }
+
+        /// <summary>
+        /// The "Never HDR" games: library games under their real name, other programs by process name.
+        /// Keys start with "never:" so they never clash with the normal row of the same game.
+        /// </summary>
+        public List<GameRow> GetExcludedRows()
+        {
+            lock (Sync)
+            {
+                var ignored = new HashSet<string>(Config.IgnoredGames ?? new List<string>(), Cmp);
+                var paths = Config.ProgramPaths ?? new Dictionary<string, string>();
+                var rows = new List<GameRow>();
+                var covered = new HashSet<string>(Cmp);
+
+                foreach (var game in Config.LibraryGames ?? new List<LibraryGame>())
+                {
+                    var procs = game.Processes.Where(ignored.Contains).ToList();
+                    if (procs.Count == 0) continue;
+                    covered.UnionWith(procs);
+                    rows.Add(new GameRow
+                    {
+                        Key = "never:" + game.Id,
+                        Name = game.Name,
+                        Subtitle = procs.Count > 1 ? $"Never HDR  ·  {game.Source}  ·  {procs[0]}.exe +{procs.Count - 1}"
+                                                   : $"Never HDR  ·  {game.Source}  ·  {procs[0]}.exe",
+                        Processes = procs,
+                        ExePath = game.ExePath ?? procs.Select(p => paths.TryGetValue(p, out var known) ? known : null)
+                                                      .FirstOrDefault(p => p != null),
+                        Excluded = true
+                    });
+                }
+
+                foreach (var proc in ignored.Where(p => !covered.Contains(p)))
+                {
+                    rows.Add(new GameRow
+                    {
+                        Key = "never:proc:" + proc,
+                        Name = proc,
+                        Subtitle = $"Never HDR  ·  {proc}.exe",
+                        Processes = new List<string> { proc },
+                        ExePath = paths.TryGetValue(proc, out var path) ? path : null,
+                        Excluded = true
+                    });
+                }
+
+                return rows.OrderBy(r => r.Name, Cmp).ToList();
+            }
+        }
+
+        /// <summary>Undoes "Never HDR": the game is handled like any other again (HDR stays off until turned on).</summary>
+        public void RestoreProcesses(IEnumerable<string> processes, string displayName)
+        {
+            var list = processes.ToList();
+            lock (Sync)
+            {
+                foreach (var name in list)
+                    Config.IgnoredGames.RemoveAll(g => g.Equals(name, StringComparison.OrdinalIgnoreCase));
+                InvalidateSnapshot();
+                Save();
+            }
+            Log("LIST", $"+ '{displayName}' is no longer excluded (\"Never HDR\" undone)");
         }
 
         public void SetGameHdr(IEnumerable<string> processes, bool enabled, string displayName)
@@ -2723,6 +2799,8 @@ namespace SmartHdrManager
                     {
                         if (!Config.HdrGamesAndApps.Contains(name, Cmp))
                             Config.HdrGamesAndApps.Add(name);
+                        // Turning HDR on also undoes "Never HDR" – otherwise the exclusion would silently win
+                        Config.IgnoredGames.RemoveAll(g => g.Equals(name, StringComparison.OrdinalIgnoreCase));
                     }
                     else
                     {
@@ -2750,7 +2828,7 @@ namespace SmartHdrManager
                 InvalidateSnapshot();
                 Save();
             }
-            Log("LIST", $"- '{displayName}' will never use HDR (excluded)");
+            Log("LIST", $"- '{displayName}' will never use HDR (undo: Settings › Never HDR games, or search for it in Games)");
         }
 
         public GameOptions GetGameOptions(IEnumerable<string> processes)
@@ -2958,7 +3036,7 @@ namespace SmartHdrManager
                 Save();
                 reload = Config.ReloadColorProfileAfterSdr;
             }
-            Log("LIST", $"- '{procName}' will never use HDR (excluded)");
+            Log("LIST", $"- '{procName}' will never use HDR (undo: Settings › Never HDR games, or search for it in Games)");
 
             if (fromHotkey)
             {

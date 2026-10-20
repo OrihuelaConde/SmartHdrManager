@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.6.1 – 2026-10
+
+### Fixed
+- **"Never HDR" could not be undone** ([#2](https://github.com/VantaCode420/SmartHdrManager/issues/2)): an excluded game disappeared from the Games tab for good – the only way back was editing config.json. Now:
+  - *Settings › General › Never HDR games* lists every excluded game, like the Games tab: turn a game on to give it HDR again, or select it and click **Restore**.
+  - Searching in the Games tab also finds excluded games (marked *Never HDR*); turning one on gives it HDR again. Typing "never" lists them all.
+  - Turning HDR on for a game always undoes "Never HDR" (before, the exclusion silently won).
+- **cs2 and valorant were excluded without being asked:** older versions shipped them as "Never HDR" examples. They are removed once on the first start of 2.6.1 (exclude them again if you want).
+
 ## 2.6.0 – 2026-10
 
 ### Changed
