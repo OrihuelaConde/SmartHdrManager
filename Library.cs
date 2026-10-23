@@ -1220,7 +1220,7 @@ namespace SmartHdrManager
             {
                 if (folderOk && LooksLikeLauncher(registeredExe))
                 {
-                    var found = FindGameExecutables(folder, name, installDir).Where(e => !LooksLikeLauncher(e)).ToList();
+                    var found = FindGameExecutables(folder, name, installDir, skipLaunchers: true);
                     if (found.Count > 0)
                     {
                         // Logged once, not at every start (unchanged result = same processes as last time)
@@ -1277,29 +1277,39 @@ namespace SmartHdrManager
         /// <summary>
         /// Picks the most likely game executable(s) in an install folder: names similar to the game,
         /// Unreal "-Win64-Shipping" binaries (the process that actually runs), and large files score higher;
-        /// launchers, installers, crash reporters etc. are ignored.
+        /// launchers, installers, crash reporters etc. are ignored. With <paramref name="skipLaunchers"/>, exes that look
+        /// like launchers are left out completely (the search behind a registered launcher).
         /// </summary>
-        public static List<string> FindGameExecutables(string folder, string gameName, string installDir)
+        public static List<string> FindGameExecutables(string folder, string gameName, string installDir, bool skipLaunchers = false)
         {
             var options = new EnumerationOptions { RecurseSubdirectories = true, MaxRecursionDepth = 4, IgnoreInaccessible = true };
             string nameKey = Normalize(gameName);
             string dirKey = Normalize(installDir);
+            string initials = Initials(gameName);
 
+            // Exes under 300 KB only count when named like the game, or when the folder has no larger exe: some games
+            // keep their engine in a DLL behind a small exe (Far Cry 3 Blood Dragon, Bannerlord)
             var candidates = new List<(string Path, double Score)>();
+            var small = new List<(string Path, double Score)>();
             foreach (string exe in Directory.EnumerateFiles(folder, "*.exe", options))
             {
                 string file = Path.GetFileNameWithoutExtension(exe);
                 if (IsExcludedExe(file) || InInstallerFolder(exe, folder)) continue;
+                // Looking past a launcher: it may be named like the game ("Launcher\eg2.exe" for Evil Genius 2)
+                if (skipLaunchers && LooksLikeLauncher(exe)) continue;
 
                 long size;
                 try { size = new FileInfo(exe).Length; } catch { continue; }
-                if (size < 300 * 1024) continue;
+                if (size < 64 * 1024) continue;
 
                 string key = Normalize(file);
-                double score = Math.Log10(size);   // ~5.5 (300 KB) .. ~8.5 (300 MB)
+                double score = Math.Log10(size);   // ~4.8 (64 KB) .. ~8.5 (300 MB)
 
+                bool namedLikeGame = true;
                 if (key.Length > 0 && (key == nameKey || key == dirKey)) score += 6;
+                else if (key.Length >= 3 && key == initials) score += 6;   // "AOW4.exe" for Age of Wonders 4
                 else if (key.Length >= 3 && (nameKey.Contains(key) || dirKey.Contains(key) || key.Contains(dirKey))) score += 3;
+                else namedLikeGame = false;
 
                 if (file.EndsWith("-Win64-Shipping", StringComparison.OrdinalIgnoreCase) ||
                     file.EndsWith("-WinGDK-Shipping", StringComparison.OrdinalIgnoreCase)) score += 5;
@@ -1309,8 +1319,9 @@ namespace SmartHdrManager
                 int depth = exe.Substring(folder.Length).Count(c => c == '\\');
                 score -= Math.Max(0, depth - 1) * 0.3;
 
-                candidates.Add((exe, score));
+                (size >= 300 * 1024 || namedLikeGame ? candidates : small).Add((exe, score));
             }
+            if (candidates.Count == 0) candidates = small;
 
             var ordered = candidates.OrderByDescending(c => c.Score).ToList();
             var result = ordered.Take(1).Select(c => c.Path).ToList();
@@ -1348,6 +1359,14 @@ namespace SmartHdrManager
                 names.Add(file);
             }
             return result;
+        }
+
+        /// <summary>First letters of a game name's words, numbers kept whole: "Age of Wonders 4" → "aow4".</summary>
+        private static string Initials(string name)
+        {
+            var words = Regex.Split(name.ToLowerInvariant(), @"[^\p{L}\p{N}]+").Where(w => w.Length > 0).ToList();
+            if (words.Count < 2) return string.Empty;
+            return string.Concat(words.Select(w => w.All(char.IsDigit) ? w : w.Substring(0, 1)));
         }
 
         private static int CommonPrefixLength(string a, string b)
