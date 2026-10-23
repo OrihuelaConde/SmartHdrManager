@@ -768,7 +768,8 @@ namespace SmartHdrManager
         /// <summary>
         /// A rescan can detect other exes for a game than before (2.5.2: launchers are skipped, several exes per game).
         /// HDR on/off and the game options are stored per process name, so carry them over to the new names – otherwise
-        /// a game that was turned on would suddenly show as off, plus a stray row for the old launcher. Caller holds Sync.
+        /// a game that was turned on would suddenly show as off, plus a stray row for the old launcher. "Never HDR" and
+        /// the game options are carried over the same way. Caller holds Sync.
         /// </summary>
         private void CarryOverGameSettings(List<LibraryGame> oldGames, List<LibraryGame> newGames)
         {
@@ -802,6 +803,13 @@ namespace SmartHdrManager
                             changed = true;
                         }
                     }
+                }
+
+                // "Never HDR" follows the game too: a new exe must not bring an excluded game back to the list
+                if (!wasOn && old.Processes.Any(ignored.Contains))
+                {
+                    foreach (string p in added)
+                        if (ignored.Add(p)) { Config.IgnoredGames.Add(p); changed = true; }
                 }
 
                 // Game options (start delay, keep HDR after exit) follow the game as well
