@@ -675,17 +675,41 @@ namespace SmartHdrManager
         }
 
         // ------------------------------------------------------------------
-        // Xbox app / PC Game Pass: <drive>:\XboxGames\<game>\Content\MicrosoftGame.config
+        // Xbox app / PC Game Pass: <drive>:\<install folder>\<game>\Content\MicrosoftGame.config. The install folder is
+        // "XboxGames" unless another one was chosen in the Xbox app (read from the drive's .GamingRoot file).
         // ------------------------------------------------------------------
         private static IEnumerable<LibraryGame> ScanXbox()
         {
+            var roots = new List<string>();
             foreach (var drive in DriveInfo.GetDrives())
             {
                 if (drive.DriveType != DriveType.Fixed || !drive.IsReady) continue;
-                string root = Path.Combine(drive.RootDirectory.FullName, "XboxGames");
-                if (!Directory.Exists(root)) continue;
+                string driveRoot = drive.RootDirectory.FullName;
+                var candidates = new List<string> { Path.Combine(driveRoot, "XboxGames") };
+                try
+                {
+                    // A few hundred bytes from the Xbox app; anything large is not that file
+                    var gamingRoot = new FileInfo(Path.Combine(driveRoot, ".GamingRoot"));
+                    if (gamingRoot.Exists && gamingRoot.Length <= 64 * 1024)
+                        candidates.AddRange(ParseGamingRoot(File.ReadAllBytes(gamingRoot.FullName))
+                            .Select(f => Path.GetFullPath(Path.Combine(driveRoot, f)))
+                            .Where(f => f.StartsWith(driveRoot, StringComparison.OrdinalIgnoreCase)));
+                }
+                catch { }
 
-                foreach (string gameDir in Directory.EnumerateDirectories(root))
+                foreach (string folder in candidates)
+                    if (Directory.Exists(folder) && !roots.Contains(folder.TrimEnd('\\'), StringComparer.OrdinalIgnoreCase))
+                        roots.Add(folder.TrimEnd('\\'));
+            }
+
+            foreach (string root in roots)
+            {
+                // A folder that cannot be read only skips that folder, not the other drives
+                List<string> gameDirs;
+                try { gameDirs = Directory.EnumerateDirectories(root).ToList(); }
+                catch { continue; }
+
+                foreach (string gameDir in gameDirs)
                 {
                     LibraryGame? game = null;
                     try
@@ -720,6 +744,28 @@ namespace SmartHdrManager
                     if (game != null) yield return game;
                 }
             }
+        }
+
+        /// <summary>
+        /// Install folders listed in a drive's hidden ".GamingRoot" file, which the Xbox app writes to the root of every
+        /// drive it installs games to: the bytes "RGBX", a 32-bit count, then UTF-16 folder paths relative to the drive
+        /// root, each ending in a null character (e.g. "XboxGames"). Returns nothing for a file in another format.
+        /// </summary>
+        internal static List<string> ParseGamingRoot(byte[] data)
+        {
+            var folders = new List<string>();
+            if (data.Length < 10 || data[0] != 'R' || data[1] != 'G' || data[2] != 'B' || data[3] != 'X') return folders;
+
+            string text = System.Text.Encoding.Unicode.GetString(data, 8, (data.Length - 8) & ~1);
+            foreach (string part in text.Split('\0'))
+            {
+                string folder = part.Trim().Replace('/', '\\').Trim('\\');
+                // Relative to the drive root only: never another drive, a network path (\\server, //server) or a parent folder
+                if (folder.Length == 0 || folder.Contains(':') || folder.Contains("..") || folder.IndexOfAny(Path.GetInvalidPathChars()) >= 0 ||
+                    Path.IsPathRooted(folder)) continue;
+                if (!folders.Contains(folder, StringComparer.OrdinalIgnoreCase)) folders.Add(folder);
+            }
+            return folders;
         }
 
         // ------------------------------------------------------------------

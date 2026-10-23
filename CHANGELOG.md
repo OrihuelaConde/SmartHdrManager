@@ -8,6 +8,7 @@
 - **itch.io games** installed with the itch app are found automatically, with the executables the itch app itself would launch. Tools, comics and soundtracks are skipped.
 - **Riot Games** (VALORANT, League of Legends, …) are found automatically. Like every other game, they are only watched from outside, as Task Manager does – nothing that anti-cheat systems such as Vanguard react to.
 - **Games installed with Heroic Games Launcher** (Epic, GOG and Amazon games) are found automatically, with the exe Heroic launches.
+- **Xbox / PC Game Pass games in another install folder** are found too: the app reads the folder chosen in the Xbox app (*Settings › General › Game install options*) instead of looking in `XboxGames` only.
 
 ## 2.6.1 – 2026-10
 
