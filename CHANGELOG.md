@@ -7,6 +7,7 @@
 - **Amazon Games** (Prime Gaming) are found automatically. The app reads the Amazon Games install list with the SQLite that is part of Windows – nothing extra to install.
 - **itch.io games** installed with the itch app are found automatically, with the executables the itch app itself would launch. Tools, comics and soundtracks are skipped.
 - **Riot Games** (VALORANT, League of Legends, …) are found automatically. Like every other game, they are only watched from outside, as Task Manager does – nothing that anti-cheat systems such as Vanguard react to.
+- **Games installed with Heroic Games Launcher** (Epic, GOG and Amazon games) are found automatically, with the exe Heroic launches.
 
 ## 2.6.1 – 2026-10
 

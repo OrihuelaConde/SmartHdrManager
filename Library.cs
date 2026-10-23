@@ -11,7 +11,8 @@ namespace SmartHdrManager
 {
     /// <summary>
     /// Finds installed games in the Steam, Epic Games, GOG, Xbox (PC Game Pass), Ubisoft Connect, EA app, Rockstar and
-    /// Battle.net, Amazon Games, itch.io and Riot Games libraries, with their real names
+    /// Battle.net, Amazon Games, itch.io and Riot Games libraries and the games installed with Heroic Games Launcher, with
+    /// their real names
     /// and the executable(s) that run while playing. Read-only: only manifest files and the registry are read.
     /// </summary>
     public static class GameLibraryScanner
@@ -87,6 +88,7 @@ namespace SmartHdrManager
             Try(() => extra.AddRange(ScanAmazon()), "Amazon Games", log);
             Try(() => extra.AddRange(ScanItch()), "itch.io", log);
             Try(() => extra.AddRange(ScanRiot()), "Riot Games", log);
+            Try(() => extra.AddRange(ScanHeroic()), "Heroic", log);
             var knownProcesses = new HashSet<string>(games.SelectMany(g => g.Processes), StringComparer.OrdinalIgnoreCase);
             foreach (var g in extra)
             {
@@ -482,6 +484,143 @@ namespace SmartHdrManager
                     continue;
                 }
                 yield return Make(libId, name, "Riot Games", FindGameExecutables(dir, name, Path.GetFileName(dir)));
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Heroic Games Launcher (%AppData%\heroic): its own install lists for Epic (legendary), GOG and Amazon (nile).
+        // Games installed this way are not in the Epic / GOG / Amazon launchers' lists.
+        // ------------------------------------------------------------------
+        private static IEnumerable<LibraryGame> ScanHeroic()
+        {
+            string heroic = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "heroic");
+            if (!Directory.Exists(heroic)) return Array.Empty<LibraryGame>();
+
+            var games = new List<LibraryGame>();
+            Try(() => games.AddRange(ScanHeroicEpic(Path.Combine(heroic, "legendaryConfig", "legendary", "installed.json"))), "Heroic (Epic)", _log);
+            Try(() => games.AddRange(ScanHeroicGog(Path.Combine(heroic, "gog_store", "installed.json"))), "Heroic (GOG)", _log);
+            Try(() => games.AddRange(ScanHeroicAmazon(Path.Combine(heroic, "nile_config", "nile", "installed.json"))), "Heroic (Amazon)", _log);
+            return games;
+        }
+
+        /// <summary>legendary's installed.json: { "&lt;app name&gt;": { title, install_path, executable, is_dlc, platform } }.</summary>
+        private static IEnumerable<LibraryGame> ScanHeroicEpic(string file)
+        {
+            if (!File.Exists(file)) yield break;
+            using var doc = JsonDocument.Parse(File.ReadAllText(file));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) yield break;
+
+            foreach (var entry in doc.RootElement.EnumerateObject())
+            {
+                var g = entry.Value;
+                if (g.ValueKind != JsonValueKind.Object) continue;
+                bool dlc = g.TryGetProperty("is_dlc", out var d) && d.ValueKind == JsonValueKind.True;
+                string platform = Str(g, "platform");
+                string name = CleanName(Str(g, "title"));
+                string dir = Str(g, "install_path").Replace('/', '\\').TrimEnd('\\');
+                if (dlc || (platform.Length > 0 && !platform.StartsWith("Win", StringComparison.OrdinalIgnoreCase)) ||
+                    name.Length == 0 || dir.Length == 0 || !Directory.Exists(dir) || IsNonGameName(name)) continue;
+
+                string libId = $"heroic-epic:{entry.Name}";
+                if (TryReuse(libId, name, "Heroic (Epic)", out var cached))
+                {
+                    yield return cached;
+                    continue;
+                }
+                string exe = Str(g, "executable");
+                string? registered = exe.Length > 0 ? Path.Combine(dir, exe.Replace('/', '\\')) : null;
+                yield return Make(libId, name, "Heroic (Epic)", RegisteredOrFound(libId, name, "Heroic (Epic)", registered, dir, Path.GetFileName(dir)));
+            }
+        }
+
+        /// <summary>
+        /// Heroic's gog_store\installed.json: { "installed": [ { appName, install_path, platform, is_dlc } ] }. Name and
+        /// main exe come from the goggame-&lt;id&gt;.info file that GOG puts in every install folder.
+        /// </summary>
+        private static IEnumerable<LibraryGame> ScanHeroicGog(string file)
+        {
+            if (!File.Exists(file)) yield break;
+            using var doc = JsonDocument.Parse(File.ReadAllText(file));
+            if (!doc.RootElement.TryGetProperty("installed", out var list) || list.ValueKind != JsonValueKind.Array) yield break;
+
+            foreach (var g in list.EnumerateArray())
+            {
+                if (g.ValueKind != JsonValueKind.Object) continue;
+                bool dlc = g.TryGetProperty("is_dlc", out var d) && d.ValueKind == JsonValueKind.True;
+                string id = Str(g, "appName");
+                string platform = Str(g, "platform");
+                string dir = Str(g, "install_path").Replace('/', '\\').TrimEnd('\\');
+                if (dlc || id.Length == 0 || (platform.Length > 0 && !platform.Equals("windows", StringComparison.OrdinalIgnoreCase)) ||
+                    dir.Length == 0 || !Directory.Exists(dir)) continue;
+
+                var (infoName, primaryExe) = GogInfo(dir, id);
+                string name = CleanName(infoName ?? Path.GetFileName(dir));
+                if (name.Length == 0 || IsNonGameName(name)) continue;
+
+                string libId = $"heroic-gog:{id}";
+                if (TryReuse(libId, name, "Heroic (GOG)", out var cached))
+                {
+                    yield return cached;
+                    continue;
+                }
+                yield return Make(libId, name, "Heroic (GOG)", RegisteredOrFound(libId, name, "Heroic (GOG)", primaryExe, dir, Path.GetFileName(dir)));
+            }
+        }
+
+        /// <summary>Game name and primary play task exe from goggame-&lt;id&gt;.info (null when the file is missing).</summary>
+        private static (string? Name, string? Exe) GogInfo(string dir, string id)
+        {
+            try
+            {
+                string info = Path.Combine(dir, $"goggame-{id}.info");
+                if (!File.Exists(info)) return (null, null);
+                using var doc = JsonDocument.Parse(File.ReadAllText(info));
+                var root = doc.RootElement;
+                string name = Str(root, "name");
+                string? exe = null;
+                if (root.TryGetProperty("playTasks", out var tasks) && tasks.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var t in tasks.EnumerateArray())
+                    {
+                        bool primary = t.TryGetProperty("isPrimary", out var p) && p.ValueKind == JsonValueKind.True;
+                        string path = Str(t, "path");
+                        if (!primary || Str(t, "type") != "FileTask" || !path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
+                        exe = Path.Combine(dir, path.Replace('/', '\\'));
+                        break;
+                    }
+                }
+                return (name.Length > 0 ? name : null, exe);
+            }
+            catch
+            {
+                return (null, null);
+            }
+        }
+
+        /// <summary>nile's installed.json: [ { id, version, path, size } ]; the exe comes from the game's fuel.json.</summary>
+        private static IEnumerable<LibraryGame> ScanHeroicAmazon(string file)
+        {
+            if (!File.Exists(file)) yield break;
+            using var doc = JsonDocument.Parse(File.ReadAllText(file));
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) yield break;
+
+            foreach (var g in doc.RootElement.EnumerateArray())
+            {
+                if (g.ValueKind != JsonValueKind.Object) continue;
+                string id = Str(g, "id");
+                string dir = Str(g, "path").Replace('/', '\\').TrimEnd('\\');
+                if (id.Length == 0 || dir.Length == 0 || !Directory.Exists(dir)) continue;
+                // nile keeps no title here; Heroic names the install folder after the game
+                string name = CleanName(Path.GetFileName(dir));
+                if (name.Length == 0 || IsNonGameName(name)) continue;
+
+                string libId = $"heroic-amazon:{id}";
+                if (TryReuse(libId, name, "Heroic (Amazon)", out var cached))
+                {
+                    yield return cached;
+                    continue;
+                }
+                yield return Make(libId, name, "Heroic (Amazon)", RegisteredOrFound(libId, name, "Heroic (Amazon)", FuelCommand(dir), dir, Path.GetFileName(dir)));
             }
         }
 
