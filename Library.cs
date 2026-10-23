@@ -11,7 +11,7 @@ namespace SmartHdrManager
 {
     /// <summary>
     /// Finds installed games in the Steam, Epic Games, GOG, Xbox (PC Game Pass), Ubisoft Connect, EA app, Rockstar and
-    /// Battle.net libraries, with their real names
+    /// Battle.net and Amazon Games libraries, with their real names
     /// and the executable(s) that run while playing. Read-only: only manifest files and the registry are read.
     /// </summary>
     public static class GameLibraryScanner
@@ -84,6 +84,7 @@ namespace SmartHdrManager
             Try(() => extra.AddRange(ScanEaApp()), "EA app", log);
             Try(() => extra.AddRange(ScanRockstar()), "Rockstar", log);
             Try(() => extra.AddRange(ScanBattleNet()), "Battle.net", log);
+            Try(() => extra.AddRange(ScanAmazon()), "Amazon Games", log);
             var knownProcesses = new HashSet<string>(games.SelectMany(g => g.Processes), StringComparer.OrdinalIgnoreCase);
             foreach (var g in extra)
             {
@@ -340,6 +341,56 @@ namespace SmartHdrManager
                 yield return Make(libId, name, "Battle.net", FindGameExecutables(dir, name, Path.GetFileName(dir)));
             }
         }
+
+        // ------------------------------------------------------------------
+        // Amazon Games: %LocalAppData%\Amazon Games\Data\Games\Sql\GameInstallInfo.sqlite (table DbSet),
+        // the launch exe from the game's fuel.json
+        // ------------------------------------------------------------------
+        private static IEnumerable<LibraryGame> ScanAmazon()
+        {
+            string db = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Amazon Games", "Data", "Games", "Sql", "GameInstallInfo.sqlite");
+            if (!File.Exists(db)) yield break;
+
+            foreach (var row in ReadOnlySqlite.Query(db, "SELECT Id, ProductTitle, InstallDirectory FROM DbSet WHERE Installed = 1"))
+            {
+                string id = row[0] ?? string.Empty;
+                string name = CleanName(row[1]);
+                string dir = (row[2] ?? string.Empty).Replace('/', '\\').TrimEnd('\\');
+                if (id.Length == 0 || name.Length == 0 || dir.Length == 0 || !Directory.Exists(dir) || IsNonGameName(name)) continue;
+
+                string libId = $"amazon:{id}";
+                if (TryReuse(libId, name, "Amazon Games", out var cached))
+                {
+                    yield return cached;
+                    continue;
+                }
+                var exes = RegisteredOrFound(libId, name, "Amazon Games", FuelCommand(dir), dir, Path.GetFileName(dir));
+                yield return Make(libId, name, "Amazon Games", exes);
+            }
+        }
+
+        /// <summary>The exe in an Amazon game's fuel.json ("Main" › "Command"), or null.</summary>
+        private static string? FuelCommand(string gameDir)
+        {
+            try
+            {
+                string fuel = Path.Combine(gameDir, "fuel.json");
+                if (!File.Exists(fuel)) return null;
+                using var doc = JsonDocument.Parse(File.ReadAllText(fuel));
+                if (!doc.RootElement.TryGetProperty("Main", out var main)) return null;
+                string command = Str(main, "Command");
+                return command.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? Path.Combine(gameDir, command.Replace('/', '\\')) : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>A store title without trademark signs ("Game™" → "Game").</summary>
+        private static string CleanName(string? name) =>
+            (name ?? string.Empty).Replace("™", string.Empty).Replace("®", string.Empty).Replace("©", string.Empty).Trim();
 
         private static string? UninstallDisplayName(string subKey)
         {

@@ -43,7 +43,7 @@ Settings are stored in `%AppData%\SmartHdrManager\config.json`, the log in `%Loc
 
 | HDR turns on when … | How it is detected |
 |---|---|
-| A game from your list is running | Games tab: games from Steam, Epic, GOG, Xbox, Ubisoft Connect, EA app, Rockstar and Battle.net are found automatically – switch HDR on per game. |
+| A game from your list is running | Games tab: games from Steam, Epic, GOG, Xbox, Ubisoft Connect, EA app, Rockstar, Battle.net and Amazon Games are found automatically – switch HDR on per game. |
 | A real HDR video plays on YouTube | The browser script marks the tab (see below). |
 | A local HDR movie plays full screen | Video player (VLC, mpv, mpv.net, MPC-HC, MPC-BE, PotPlayer – see the Apps tab) + "HDR", "Dolby Vision", "DoVi" or "BT2020" in the window title. |
 | A video is opened with "<Player> (with HDR)" | **Apps** tab › Video players: HDR switches on *before* the player starts – best for RTX Video HDR (see below). |

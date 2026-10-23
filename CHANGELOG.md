@@ -4,6 +4,7 @@
 
 ### New
 - **Battle.net games** are found automatically, with their real names (Diablo IV, Overwatch 2, Call of Duty, …). Test realms and betas are skipped.
+- **Amazon Games** (Prime Gaming) are found automatically. The app reads the Amazon Games install list with the SQLite that is part of Windows – nothing extra to install.
 
 ## 2.6.1 – 2026-10
 
