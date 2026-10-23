@@ -676,7 +676,7 @@ namespace SmartHdrManager
                     Save();
                 }
                 if (iconsFound > 0) Log("SCAN", $"Program locations found for {iconsFound} program(s) (icons).");
-                Log("SCAN", $"Game library: {games.Count} games found (Steam, Epic, GOG, Xbox, Ubisoft, EA, Rockstar, Battle.net, Amazon).");
+                Log("SCAN", $"Game library: {games.Count} games found (Steam, Epic, GOG, Xbox, Ubisoft, EA, Rockstar, Battle.net, Amazon, itch.io).");
                 LibraryChanged?.Invoke(this, EventArgs.Empty);
             }
             catch (Exception ex)

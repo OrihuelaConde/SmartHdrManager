@@ -11,7 +11,7 @@ namespace SmartHdrManager
 {
     /// <summary>
     /// Finds installed games in the Steam, Epic Games, GOG, Xbox (PC Game Pass), Ubisoft Connect, EA app, Rockstar and
-    /// Battle.net and Amazon Games libraries, with their real names
+    /// Battle.net, Amazon Games and itch.io libraries, with their real names
     /// and the executable(s) that run while playing. Read-only: only manifest files and the registry are read.
     /// </summary>
     public static class GameLibraryScanner
@@ -85,6 +85,7 @@ namespace SmartHdrManager
             Try(() => extra.AddRange(ScanRockstar()), "Rockstar", log);
             Try(() => extra.AddRange(ScanBattleNet()), "Battle.net", log);
             Try(() => extra.AddRange(ScanAmazon()), "Amazon Games", log);
+            Try(() => extra.AddRange(ScanItch()), "itch.io", log);
             var knownProcesses = new HashSet<string>(games.SelectMany(g => g.Processes), StringComparer.OrdinalIgnoreCase);
             foreach (var g in extra)
             {
@@ -385,6 +386,73 @@ namespace SmartHdrManager
             catch
             {
                 return null;
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // itch.io app: %AppData%\itch\db\butler.db – one "cave" per install, its "verdict" (JSON) lists the
+        // install folder and the executables the app would launch
+        // ------------------------------------------------------------------
+        private static IEnumerable<LibraryGame> ScanItch()
+        {
+            string db = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "itch", "db", "butler.db");
+            if (!File.Exists(db)) yield break;
+
+            const string sql = "SELECT games.id, games.title, games.classification, caves.verdict FROM caves JOIN games ON games.id = caves.game_id";
+            foreach (var row in ReadOnlySqlite.Query(db, sql))
+            {
+                string id = row[0] ?? string.Empty;
+                string name = CleanName(row[1]);
+                // Tools, comics, soundtracks, assets … can be installed too
+                if (id.Length == 0 || name.Length == 0 || !string.Equals(row[2], "game", StringComparison.OrdinalIgnoreCase) || IsNonGameName(name)) continue;
+
+                string libId = $"itch:{id}";
+                if (TryReuse(libId, name, "itch.io", out var cached))
+                {
+                    yield return cached;
+                    continue;
+                }
+
+                var (dir, candidates) = ItchVerdict(row[3]);
+                if (dir.Length == 0 || !Directory.Exists(dir)) continue;
+                var exes = candidates.Count > 0
+                    ? RegisteredOrFound(libId, name, "itch.io", candidates[0], dir, Path.GetFileName(dir))
+                    : FindGameExecutables(dir, name, Path.GetFileName(dir));
+                // Further native Windows candidates (e.g. a DX11 and a DX12 exe) are watched as well
+                foreach (string extraExe in candidates.Skip(1))
+                    if (exes.Count < 3 && !exes.Contains(extraExe, StringComparer.OrdinalIgnoreCase) && !LooksLikeLauncher(extraExe)) exes.Add(extraExe);
+                yield return Make(libId, name, "itch.io", exes);
+            }
+        }
+
+        /// <summary>Install folder and native Windows executables (full paths that exist) of an itch.io install's verdict.</summary>
+        private static (string Dir, List<string> Exes) ItchVerdict(string? json)
+        {
+            var exes = new List<string>();
+            if (string.IsNullOrWhiteSpace(json)) return (string.Empty, exes);
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                string dir = Str(root, "basePath").Replace('/', '\\').TrimEnd('\\');
+                if (dir.Length == 0) return (string.Empty, exes);
+                if (root.TryGetProperty("candidates", out var list) && list.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var c in list.EnumerateArray())
+                    {
+                        string path = Str(c, "path").Replace('/', '\\');
+                        // "helper" marks runtime plumbing next to the game (crash handlers, bundled Java / Python …)
+                        if (Str(c, "flavor") != "windows" || Str(c, "helper").Length > 0 ||
+                            !path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || IsExcludedExe(Path.GetFileNameWithoutExtension(path))) continue;
+                        string full = Path.Combine(dir, path);
+                        if (File.Exists(full)) exes.Add(full);
+                    }
+                }
+                return (dir, exes);
+            }
+            catch
+            {
+                return (string.Empty, exes);
             }
         }
 
