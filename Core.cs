@@ -1288,8 +1288,15 @@ namespace SmartHdrManager
 
         public static (string ProcessName, string WindowTitle, bool IsFullscreen) GetActiveWindowState()
         {
+            var (processName, title, isFullscreen, _) = GetActiveWindowInfo();
+            return (processName, title, isFullscreen);
+        }
+
+        /// <summary>Like <see cref="GetActiveWindowState"/>, plus the process id of the same window (0 = no window).</summary>
+        public static (string ProcessName, string WindowTitle, bool IsFullscreen, int ProcessId) GetActiveWindowInfo()
+        {
             IntPtr hWnd = GetForegroundWindow();
-            if (hWnd == IntPtr.Zero) return (string.Empty, string.Empty, false);
+            if (hWnd == IntPtr.Zero) return (string.Empty, string.Empty, false, 0);
 
             // One reusable buffer per thread instead of a new StringBuilder 10x per second
             var sb = _titleBuffer ??= new StringBuilder(512);
@@ -1302,7 +1309,7 @@ namespace SmartHdrManager
 
             bool isFullscreen = processName != "explorer" && processName != "searchhost" && IsWindowFullscreen(hWnd);
 
-            return (processName, title, isFullscreen);
+            return (processName, title, isFullscreen, (int)pid);
         }
 
         private static bool IsWindowFullscreen(IntPtr hWnd)
