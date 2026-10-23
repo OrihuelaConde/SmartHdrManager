@@ -17,6 +17,7 @@
 
 ### Fixed
 - **More launchers are recognised:** Paradox's launcher (`dowser.exe`), PlayLAN, Thief: Deadly Shadows' `runme.exe`, the FINAL FANTASY XIV and Elite Dangerous launchers and programs in a `Launcher` folder are treated as launchers, so the app watches the game they start.
+- **Games whose starter runs another exe:** the app also watches the real game exe in a subfolder when its name extends the starter's name, e.g. `HeroesOfTheStorm_x64.exe` next to `Heroes of the Storm.exe`.
 
 ## 2.6.1 – 2026-10
 

@@ -1295,17 +1295,22 @@ namespace SmartHdrManager
             // well as the best one (at most 3 names in total). Only exes that clearly belong to the game: the name
             // matches the game / folder name, or starts like the main exe ("Game_DX12" next to "Game"). Tools,
             // launchers, installers and patchers are never added (e.g. a bundled "p4vinst64.exe" next to "OLGame.exe").
+            // An exe whose name adds a short suffix to the main exe's name counts at any score: "Heroes of the Storm.exe"
+            // only starts "HeroesOfTheStorm_x64.exe" in a subfolder (but "Fallout3 - Garden of Eden Creation Kit" is
+            // the editor).
             double best = ordered[0].Score;
             string bestKey = Normalize(Path.GetFileNameWithoutExtension(ordered[0].Path));
             var names = new HashSet<string>(result.Select(p => Path.GetFileNameWithoutExtension(p)), StringComparer.OrdinalIgnoreCase);
             foreach (var (path, score) in ordered.Skip(1))
             {
-                if (names.Count >= 3 || score < best - 1.0) break;
+                if (names.Count >= 3) break;
                 string file = Path.GetFileNameWithoutExtension(path);
                 string lower = file.ToLowerInvariant();
                 if (names.Contains(file) || NotAGameExeParts.Any(lower.Contains) || LooksLikeLauncher(file)) continue;
 
                 string key = Normalize(file);
+                bool extendsMain = bestKey.Length >= 4 && key.Length > bestKey.Length && key.Length <= bestKey.Length + 5 && key.StartsWith(bestKey);
+                if (score < best - 1.0 && !extendsMain) continue;
                 bool namedLikeGame = key.Length >= 3 && (key == nameKey || key == dirKey || nameKey.Contains(key) || dirKey.Contains(key));
                 bool sameStem = key.Length >= 4 && bestKey.Length >= 4 && (key.StartsWith(bestKey) || bestKey.StartsWith(key) ||
                                 CommonPrefixLength(key, bestKey) >= Math.Max(4, Math.Min(key.Length, bestKey.Length) - 2));
