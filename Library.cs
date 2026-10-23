@@ -46,7 +46,15 @@ namespace SmartHdrManager
             "unins", "uninst", "setup", "install", "redist", "vcredist", "vc_redist", "dxsetup", "directx", "dotnet",
             "crash", "report", "bugsplat", "sentry", "easyanticheat", "eac_", "battleye", "beservice", "anticheat",
             "prereq", "cleanup", "touchup", "helper", "updater", "update", "cefprocess", "webhelper", "quicksfv",
-            "dxwebsetup", "physx", "ue4prereq", "ueprereq", "unitycrashhandler", "crs-handler", "cmd", "python"
+            "dxwebsetup", "physx", "ue4prereq", "ueprereq", "unitycrashhandler", "crs-handler", "cmd", "python", "netfx",
+            "companion", "supporttool", "watchdog", "pbsvc", "punkbuster", "javaw"
+        };
+
+        // Folders inside a game folder that only hold installers and runtimes ("_CommonRedist", "Support\dotNetFramework")
+        private static readonly HashSet<string> InstallerFolders = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "_commonredist", "commonredist", "redist", "redistributables", "dotnetframework", "dotnetcore", "directx",
+            "vcredist", "prerequisites", "prereqs", "__installer", "installers", "support"
         };
 
         // Launcher programs that only start the real game and then close (or wait in the background). A library entry
@@ -62,7 +70,8 @@ namespace SmartHdrManager
         private static readonly string[] NotAGameExeParts =
         {
             "launcher", "config", "settings", "setting", "benchmark", "editor", "tool", "server", "modmanager",
-            "mod_manager", "uploader", "patch", "selector", "inst", "map", "sdk", "p4v", "vcs"
+            "mod_manager", "uploader", "patch", "selector", "inst", "map", "sdk", "p4v", "vcs", "support", "console",
+            "creation kit"
         };
 
         // Bumped when the exe detection changes, so cached library entries are detected again once after an update
@@ -271,7 +280,7 @@ namespace SmartHdrManager
             try
             {
                 var options = new EnumerationOptions { RecurseSubdirectories = true, MaxRecursionDepth = 4, IgnoreInaccessible = true };
-                return Directory.EnumerateFiles(folder, "*.exe", options).ToList();
+                return Directory.EnumerateFiles(folder, "*.exe", options).Where(e => !InInstallerFolder(e, folder)).ToList();
             }
             catch
             {
@@ -1246,6 +1255,23 @@ namespace SmartHdrManager
             return ExcludedExeParts.Any(n.Contains);
         }
 
+        /// <summary>
+        /// True for an exe below <paramref name="folder"/> in an installer folder (<see cref="InstallerFolders"/>) or in a
+        /// bundled Java runtime ("jre", "jdk-17", "java_vm"), whose tools are never the game.
+        /// </summary>
+        private static bool InInstallerFolder(string exe, string folder)
+        {
+            string root = folder.TrimEnd('\\');
+            for (string? dir = Path.GetDirectoryName(exe); dir != null && dir.Length > root.Length; dir = Path.GetDirectoryName(dir))
+            {
+                string name = Path.GetFileName(dir);
+                if (InstallerFolders.Contains(name) || name.Equals("java_vm", StringComparison.OrdinalIgnoreCase) ||
+                    name.StartsWith("jre", StringComparison.OrdinalIgnoreCase) || name.StartsWith("jdk", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
         private static string Normalize(string s) => new string(s.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
 
         /// <summary>
@@ -1263,7 +1289,7 @@ namespace SmartHdrManager
             foreach (string exe in Directory.EnumerateFiles(folder, "*.exe", options))
             {
                 string file = Path.GetFileNameWithoutExtension(exe);
-                if (IsExcludedExe(file)) continue;
+                if (IsExcludedExe(file) || InInstallerFolder(exe, folder)) continue;
 
                 long size;
                 try { size = new FileInfo(exe).Length; } catch { continue; }
@@ -1309,6 +1335,8 @@ namespace SmartHdrManager
                 if (names.Contains(file) || NotAGameExeParts.Any(lower.Contains) || LooksLikeLauncher(file)) continue;
 
                 string key = Normalize(file);
+                // The main name plus a tool ending ("Sins of a Solar Empire Rebellion Dev")
+                if (key.Length > bestKey.Length && key.StartsWith(bestKey) && ToolEndings.Contains(key.Substring(bestKey.Length))) continue;
                 bool extendsMain = bestKey.Length >= 4 && key.Length > bestKey.Length && key.Length <= bestKey.Length + 5 && key.StartsWith(bestKey);
                 if (score < best - 1.0 && !extendsMain) continue;
                 bool namedLikeGame = key.Length >= 3 && (key == nameKey || key == dirKey || nameKey.Contains(key) || dirKey.Contains(key));

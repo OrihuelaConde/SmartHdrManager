@@ -18,6 +18,7 @@
 ### Fixed
 - **More launchers are recognised:** Paradox's launcher (`dowser.exe`), PlayLAN, Thief: Deadly Shadows' `runme.exe`, the FINAL FANTASY XIV and Elite Dangerous launchers and programs in a `Launcher` folder are treated as launchers, so the app watches the game they start.
 - **Games whose starter runs another exe:** the app also watches the real game exe in a subfolder when its name extends the starter's name, e.g. `HeroesOfTheStorm_x64.exe` next to `Heroes of the Storm.exe`.
+- **Installers, runtimes and helper programs are no longer taken for the game:** exes in installer folders and bundled Java runtimes (`_CommonRedist`, `Support`, `DotNetCore`, `jre`, …), .NET installers (`netfx…`), companion apps, crash watchdogs, PunkBuster, the Java runtime (`javaw.exe`) and support tools are skipped when the app looks for a game's exe. Editors, consoles, dedicated servers, debug builds and support programs are no longer watched as extra exes.
 
 ## 2.6.1 – 2026-10
 
