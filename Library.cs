@@ -11,7 +11,7 @@ namespace SmartHdrManager
 {
     /// <summary>
     /// Finds installed games in the Steam, Epic Games, GOG, Xbox (PC Game Pass), Ubisoft Connect, EA app, Rockstar and
-    /// Battle.net, Amazon Games and itch.io libraries, with their real names
+    /// Battle.net, Amazon Games, itch.io and Riot Games libraries, with their real names
     /// and the executable(s) that run while playing. Read-only: only manifest files and the registry are read.
     /// </summary>
     public static class GameLibraryScanner
@@ -86,6 +86,7 @@ namespace SmartHdrManager
             Try(() => extra.AddRange(ScanBattleNet()), "Battle.net", log);
             Try(() => extra.AddRange(ScanAmazon()), "Amazon Games", log);
             Try(() => extra.AddRange(ScanItch()), "itch.io", log);
+            Try(() => extra.AddRange(ScanRiot()), "Riot Games", log);
             var knownProcesses = new HashSet<string>(games.SelectMany(g => g.Processes), StringComparer.OrdinalIgnoreCase);
             foreach (var g in extra)
             {
@@ -456,6 +457,34 @@ namespace SmartHdrManager
             }
         }
 
+        // ------------------------------------------------------------------
+        // Riot Client: per-user uninstall entries "Riot Game <product>.<patchline>" (e.g. "Riot Game valorant.live")
+        // ------------------------------------------------------------------
+        private static IEnumerable<LibraryGame> ScanRiot()
+        {
+            const string prefix = "Riot Game ";
+            foreach (var (subKey, name, location, _) in UninstallEntries())
+            {
+                if (!subKey.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                string product = subKey.Substring(prefix.Length).Trim().ToLowerInvariant();
+                // The Riot Client itself, and test patchlines (PBE) next to the live game
+                if (product.StartsWith("riot_client", StringComparison.Ordinal)) continue;
+                int dot = product.LastIndexOf('.');
+                if (dot > 0 && product.Substring(dot + 1) != "live") continue;
+
+                string dir = location.Trim().Trim('"').Replace('/', '\\').TrimEnd('\\');
+                if (name.Length == 0 || dir.Length == 0 || !Directory.Exists(dir) || IsNonGameName(name)) continue;
+
+                string libId = $"riot:{product}";
+                if (TryReuse(libId, name, "Riot Games", out var cached))
+                {
+                    yield return cached;
+                    continue;
+                }
+                yield return Make(libId, name, "Riot Games", FindGameExecutables(dir, name, Path.GetFileName(dir)));
+            }
+        }
+
         /// <summary>A store title without trademark signs ("Game™" → "Game").</summary>
         private static string CleanName(string? name) =>
             (name ?? string.Empty).Replace("™", string.Empty).Replace("®", string.Empty).Replace("©", string.Empty).Trim();
@@ -474,12 +503,20 @@ namespace SmartHdrManager
             return null;
         }
 
-        /// <summary>(subkey, DisplayName, InstallLocation, UninstallString) of installed programs (HKLM, 32 + 64 bit).</summary>
+        /// <summary>
+        /// (subkey, DisplayName, InstallLocation, UninstallString) of installed programs: machine-wide (32 + 64 bit) and
+        /// per user (Riot Games registers its games for the current user only).
+        /// </summary>
         private static IEnumerable<(string SubKey, string Name, string Location, string Uninstall)> UninstallEntries()
         {
-            foreach (string root in new[] { @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall", @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" })
+            foreach (var (hive, root) in new[]
             {
-                using var key = Registry.LocalMachine.OpenSubKey(root);
+                (Registry.LocalMachine, @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (Registry.LocalMachine, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (Registry.CurrentUser, @"Software\Microsoft\Windows\CurrentVersion\Uninstall")
+            })
+            {
+                using var key = hive.OpenSubKey(root);
                 if (key == null) continue;
                 foreach (string sub in key.GetSubKeyNames())
                 {

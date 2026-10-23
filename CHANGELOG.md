@@ -6,6 +6,7 @@
 - **Battle.net games** are found automatically, with their real names (Diablo IV, Overwatch 2, Call of Duty, …). Test realms and betas are skipped.
 - **Amazon Games** (Prime Gaming) are found automatically. The app reads the Amazon Games install list with the SQLite that is part of Windows – nothing extra to install.
 - **itch.io games** installed with the itch app are found automatically, with the executables the itch app itself would launch. Tools, comics and soundtracks are skipped.
+- **Riot Games** (VALORANT, League of Legends, …) are found automatically. Like every other game, they are only watched from outside, as Task Manager does – nothing that anti-cheat systems such as Vanguard react to.
 
 ## 2.6.1 – 2026-10
 
