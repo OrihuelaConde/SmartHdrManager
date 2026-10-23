@@ -9,6 +9,7 @@
 - **Riot Games** (VALORANT, League of Legends, …) are found automatically. Like every other game, they are only watched from outside, as Task Manager does – nothing that anti-cheat systems such as Vanguard react to.
 - **Games installed with Heroic Games Launcher** (Epic, GOG and Amazon games) are found automatically, with the exe Heroic launches.
 - **Xbox / PC Game Pass games in another install folder** are found too: the app reads the folder chosen in the Xbox app (*Settings › General › Game install options*) instead of looking in `XboxGames` only.
+- **Games without a launcher** (DRM-free downloads, emulators, …) are suggested in the Games tab when the Xbox Game Bar recognised them while they ran. They are listed under the name of their game folder and stay off until you turn them on. Programs from the Apps tab are never suggested. A program that the Game Bar saw in the folder of a library game is added to that game instead, for example the real game exe behind a starter.
 
 ### Changed
 - **Steam games: the exe Steam really starts.** The app reads the game's launch options from Steam's local app cache (`appcache\appinfo.vdf`) instead of guessing the exe from file names and sizes. Launchers in the launch options are skipped as before, and so are the editors, tools and comics that some games also ship. Software, videos and soundtracks that Steam installs like games (a budget app, a trailer) are no longer listed. If the cache cannot be read, the old search is used. Library games are detected once more after the update; your HDR choices are kept.

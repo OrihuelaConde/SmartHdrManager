@@ -640,20 +640,25 @@ namespace SmartHdrManager
             try
             {
                 Dictionary<string, LibraryGame>? previous = null;
-                if (!fullRescan)
+                HashSet<string> apps;
+                lock (Sync)
                 {
                     // Copies: the scan runs outside the lock, while the engine thread may add a learned launcher game
-                    lock (Sync)
+                    if (!fullRescan)
                         previous = (Config.LibraryGames ?? new List<LibraryGame>())
                             .GroupBy(g => g.Id, Cmp).ToDictionary(g => g.Key, g => CopyOf(g.First()), Cmp);
+                    apps = new HashSet<string>((Config.AppRules ?? new Dictionary<string, AppRule>()).Keys, Cmp);   // Apps tab: not games
                 }
 
-                var games = GameLibraryScanner.Scan(previous, msg => Log("SCAN", msg));
+                var games = GameLibraryScanner.Scan(previous, msg => Log("SCAN", msg), apps);
                 var knownPaths = GameLibraryScanner.FindKnownExePaths();
                 int iconsFound = 0;
                 lock (Sync)
                 {
                     MergeLearnedLaunchers(games);
+                    // A Game Bar suggestion for a game process learned from its launcher would list the game twice
+                    var covered = new HashSet<string>(games.Where(g => g.Source != "Game Bar").SelectMany(g => g.Processes), Cmp);
+                    games.RemoveAll(g => g.Source == "Game Bar" && g.Processes.Any(covered.Contains));
                     CarryOverGameSettings(Config.LibraryGames ?? new List<LibraryGame>(), games);
                     Config.LibraryGames = games;
                     InvalidateSnapshot();
@@ -676,7 +681,7 @@ namespace SmartHdrManager
                     Save();
                 }
                 if (iconsFound > 0) Log("SCAN", $"Program locations found for {iconsFound} program(s) (icons).");
-                Log("SCAN", $"Game library: {games.Count} games found (Steam, Epic, GOG, Xbox, Ubisoft, EA, Rockstar, Battle.net, Amazon, itch.io, Riot, Heroic).");
+                Log("SCAN", $"Game library: {games.Count} games found (Steam, Epic, GOG, Xbox, Ubisoft, EA, Rockstar, Battle.net, Amazon, itch.io, Riot, Heroic, Game Bar).");
                 LibraryChanged?.Invoke(this, EventArgs.Empty);
             }
             catch (Exception ex)

@@ -11,8 +11,8 @@ namespace SmartHdrManager
 {
     /// <summary>
     /// Finds installed games in the Steam, Epic Games, GOG, Xbox (PC Game Pass), Ubisoft Connect, EA app, Rockstar and
-    /// Battle.net, Amazon Games, itch.io and Riot Games libraries and the games installed with Heroic Games Launcher, with
-    /// their real names
+    /// Battle.net, Amazon Games, itch.io and Riot Games libraries and the games installed with Heroic Games Launcher, plus
+    /// games that only the Xbox Game Bar knows about, with their real names
     /// and the executable(s) that run while playing. Read-only: only manifest files and the registry are read.
     /// </summary>
     public static class GameLibraryScanner
@@ -75,7 +75,9 @@ namespace SmartHdrManager
         [ThreadStatic] private static IReadOnlyDictionary<string, LibraryGame>? _previous;
         [ThreadStatic] private static Action<string>? _log;
 
-        public static List<LibraryGame> Scan(IReadOnlyDictionary<string, LibraryGame>? previous, Action<string>? log = null)
+        /// <param name="notGames">Programs that are known not to be games (the Apps tab): never suggested from the Game Bar list.</param>
+        public static List<LibraryGame> Scan(IReadOnlyDictionary<string, LibraryGame>? previous, Action<string>? log = null,
+                                             ISet<string>? notGames = null)
         {
             _previous = previous;
             _log = log;
@@ -103,6 +105,9 @@ namespace SmartHdrManager
                 games.Add(g);
                 foreach (var p in g.Processes) knownProcesses.Add(p);
             }
+
+            // Last: games Windows recognised while they ran that no launcher lists (DRM-free downloads, emulators, …)
+            Try(() => games.AddRange(ScanGameBar(games, knownProcesses, notGames).ToList()), "Game Bar", log);
 
             _previous = null;
             _log = null;
@@ -806,6 +811,111 @@ namespace SmartHdrManager
             }
         }
 
+        // ------------------------------------------------------------------
+        // Xbox Game Bar: games Windows recognised while they ran (HKCU\System\GameConfigStore\Children). Only programs
+        // that no launcher lists; named after their game folder. An exe inside the folder of a library game is another
+        // process of that game (the real game behind a starter) and is added to it instead.
+        // ------------------------------------------------------------------
+        private static IEnumerable<LibraryGame> ScanGameBar(List<LibraryGame> library, ISet<string> knownProcesses, ISet<string>? notGames)
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\');
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var libraryFolders = new List<(string Folder, LibraryGame Game)>();
+            foreach (var g in library)
+                if (!string.IsNullOrEmpty(g.ExePath) && HdrLauncher.GameFolder(g.ExePath) is { } f) libraryFolders.Add((f.TrimEnd('\\') + "\\", g));
+
+            foreach (string exe in GameBarExePaths())
+            {
+                // Only .exe files: the process of "Aion.bin" is not called "aion"
+                if (!exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
+                string process = Path.GetFileNameWithoutExtension(exe).ToLowerInvariant();
+                if (process.Length == 0 || seen.Contains(process) || knownProcesses.Contains(process) || notGames?.Contains(process) == true) continue;
+                if (IsExcludedExe(process) || LooksLikeLauncher(exe) || AppCatalog.IsKnown(process) || LauncherClients.Contains(process)) continue;
+                if (windows.Length > 0 && exe.StartsWith(windows + "\\", StringComparison.OrdinalIgnoreCase)) continue;
+                try
+                {
+                    if (!File.Exists(exe) || new FileInfo(exe).Length < 300 * 1024) continue;
+                }
+                catch
+                {
+                    continue;
+                }
+                seen.Add(process);   // only now: an old entry whose exe is gone must not hide a later one with the same name
+
+                var owner = libraryFolders.FirstOrDefault(l => exe.StartsWith(l.Folder, StringComparison.OrdinalIgnoreCase)).Game;
+                if (owner != null)
+                {
+                    // A tool of that game (editor, config, server …) is not added: the game's HDR setting would carry over to it
+                    if (owner.Processes.Count < 4 && !IsToolLike(exe)) owner.Processes.Add(process);
+                    knownProcesses.Add(process);
+                    continue;
+                }
+
+                string name = GameBarName(exe, process);
+                if (name.Length == 0 || IsNonGameName(name)) continue;
+                yield return Make($"gamebar:{process}", name, "Game Bar", new List<string> { exe });
+            }
+        }
+
+        // Game launcher apps themselves, which the Game Bar can record too
+        private static readonly HashSet<string> LauncherClients = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "steam", "steamwebhelper", "galaxyclient", "upc", "ubisoftconnect", "eadesktop", "origin", "battle.net",
+            "riotclientservices", "riotclientux", "amazon games ui", "itch", "heroic", "xboxpcapp", "playnite.desktopapp",
+            "playnite.fullscreenapp"
+        };
+
+        // Folders inside a game folder that do not name the game ("Versions\Base95817", "_retail_", "RetailClient")
+        private static readonly Regex GenericGameSubfolder = new(
+            @"^(_.*|base\d+|bin\w*|binaries|client|game|live|release|retail|retailclient|shipping|system|versions|win32|win64|x64|x86)$",
+            RegexOptions.IgnoreCase);
+
+        /// <summary>
+        /// Name of a Game Bar game: its game folder, skipping folders inside it that do not name the game
+        /// ("World of Warcraft\_retail_\Wow.exe" → "World of Warcraft"), or the exe's product name when the folder is
+        /// only named like the exe; else the exe's description.
+        /// </summary>
+        private static string GameBarName(string exe, string process)
+        {
+            string? folder = HdrLauncher.GameFolder(exe);
+            // GameFolder of a folder is its parent, with the same checks (never a drive root or "Games")
+            for (int i = 0; i < 3 && folder != null && GenericGameSubfolder.IsMatch(Path.GetFileName(folder)); i++)
+                folder = HdrLauncher.GameFolder(folder);
+            if (folder == null || GenericGameSubfolder.IsMatch(Path.GetFileName(folder))) return AppCatalog.NameFor(process, exe);
+
+            // A folder named like the exe ("swtor\retailclient\swtor.exe"): the product name is the better title
+            string name = Path.GetFileName(folder);
+            if (Normalize(name) == Normalize(process))
+            {
+                try
+                {
+                    string product = CleanName(System.Diagnostics.FileVersionInfo.GetVersionInfo(exe).ProductName);
+                    if (product.Length >= 3 && product.Length <= 40 && product.Any(char.IsLetter)) return product;
+                }
+                catch { }
+            }
+            return name;
+        }
+
+        /// <summary>Exe paths in the Game Bar's list of played games ("MatchedExeFullPath" of each entry).</summary>
+        private static List<string> GameBarExePaths()
+        {
+            var paths = new List<string>();
+            try
+            {
+                using var store = Registry.CurrentUser.OpenSubKey(@"System\GameConfigStore\Children");
+                if (store == null) return paths;
+                foreach (string sub in store.GetSubKeyNames())
+                {
+                    using var game = store.OpenSubKey(sub);
+                    if (game?.GetValue("MatchedExeFullPath") is string path && path.Trim().Length > 0)
+                        paths.Add(path.Trim().Trim('"'));
+                }
+            }
+            catch { }
+            return paths;
+        }
+
         /// <summary>A store title without trademark signs ("Game™" → "Game").</summary>
         private static string CleanName(string? name) =>
             (name ?? string.Empty).Replace("™", string.Empty).Replace("®", string.Empty).Replace("©", string.Empty).Trim();
@@ -975,19 +1085,7 @@ namespace SmartHdrManager
             }
 
             // Game Bar / Game Mode: one subkey per game that was played
-            try
-            {
-                using var store = Registry.CurrentUser.OpenSubKey(@"System\GameConfigStore\Children");
-                if (store != null)
-                {
-                    foreach (string sub in store.GetSubKeyNames())
-                    {
-                        using var game = store.OpenSubKey(sub);
-                        Add(game?.GetValue("MatchedExeFullPath") as string);
-                    }
-                }
-            }
-            catch { }
+            foreach (string path in GameBarExePaths()) Add(path);
 
             // Explorer's MuiCache: value names like "C:\Games\Cyberpunk 2077\bin\x64\Cyberpunk2077.exe.FriendlyAppName"
             try

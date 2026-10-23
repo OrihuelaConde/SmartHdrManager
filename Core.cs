@@ -189,7 +189,7 @@ namespace SmartHdrManager
     {
         public string Id { get; set; } = string.Empty;          // e.g. "steam:1091500"
         public string Name { get; set; } = string.Empty;        // display name, e.g. "Cyberpunk 2077"
-        public string Source { get; set; } = string.Empty;      // Steam / Epic / GOG / Xbox / Ubisoft / EA app / Rockstar / Battle.net / Amazon Games / itch.io / Riot Games / Heroic (…)
+        public string Source { get; set; } = string.Empty;      // Steam / Epic / GOG / Xbox / Ubisoft / EA app / Rockstar / Battle.net / Amazon Games / itch.io / Riot Games / Heroic (…) / Game Bar
         public List<string> Processes { get; set; } = new();    // process names (exe without .exe, lower case)
         public string? ExePath { get; set; }                    // main exe, used for the icon
         public int ScanVersion { get; set; }                    // GameLibraryScanner.CurrentScanVersion when it was detected
