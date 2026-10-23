@@ -10,7 +10,8 @@ using Microsoft.Win32;
 namespace SmartHdrManager
 {
     /// <summary>
-    /// Finds installed games in the Steam, Epic Games, GOG and Xbox (PC Game Pass) libraries, with their real names
+    /// Finds installed games in the Steam, Epic Games, GOG, Xbox (PC Game Pass), Ubisoft Connect, EA app, Rockstar and
+    /// Battle.net libraries, with their real names
     /// and the executable(s) that run while playing. Read-only: only manifest files and the registry are read.
     /// </summary>
     public static class GameLibraryScanner
@@ -82,6 +83,7 @@ namespace SmartHdrManager
             Try(() => extra.AddRange(ScanUbisoft()), "Ubisoft Connect", log);
             Try(() => extra.AddRange(ScanEaApp()), "EA app", log);
             Try(() => extra.AddRange(ScanRockstar()), "Rockstar", log);
+            Try(() => extra.AddRange(ScanBattleNet()), "Battle.net", log);
             var knownProcesses = new HashSet<string>(games.SelectMany(g => g.Processes), StringComparer.OrdinalIgnoreCase);
             foreach (var g in extra)
             {
@@ -308,6 +310,34 @@ namespace SmartHdrManager
                     continue;
                 }
                 yield return Make(libId, sub, "Rockstar", FindGameExecutables(dir, sub, Path.GetFileName(dir)));
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Battle.net: uninstall entries whose uninstaller is "Battle.net … --uid=<product>" (DisplayName = game name)
+        // ------------------------------------------------------------------
+        private static IEnumerable<LibraryGame> ScanBattleNet()
+        {
+            foreach (var (_, name, location, uninstall) in UninstallEntries())
+            {
+                var uid = Regex.Match(uninstall, @"Battle\.net.*--uid=([^\s""]+)", RegexOptions.IgnoreCase);
+                if (!uid.Success) continue;
+                // Public test realms and betas are separate installs of the same game
+                if (name.EndsWith("Test", StringComparison.OrdinalIgnoreCase) || name.EndsWith("Beta", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("PTR", StringComparison.Ordinal)) continue;
+                string dir = location.Trim().Trim('"').TrimEnd('\\');
+                if (name.Length == 0 || dir.Length == 0 || !Directory.Exists(dir) || IsNonGameName(name)) continue;
+                // The Battle.net app registers itself the same way
+                if (name.Equals("Battle.net", StringComparison.OrdinalIgnoreCase) ||
+                    Path.GetFileName(dir).Equals("Battle.net", StringComparison.OrdinalIgnoreCase)) continue;
+
+                string libId = $"battlenet:{uid.Groups[1].Value.ToLowerInvariant()}";
+                if (TryReuse(libId, name, "Battle.net", out var cached))
+                {
+                    yield return cached;
+                    continue;
+                }
+                yield return Make(libId, name, "Battle.net", FindGameExecutables(dir, name, Path.GetFileName(dir)));
             }
         }
 

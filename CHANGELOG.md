@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **Battle.net games** are found automatically, with their real names (Diablo IV, Overwatch 2, Call of Duty, …). Test realms and betas are skipped.
+
 ## 2.6.1 – 2026-10
 
 ### Fixed
