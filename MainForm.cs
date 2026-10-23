@@ -70,7 +70,11 @@ namespace SmartHdrManager
         private readonly ToggleSwitch _swRefreshApps = new();
         private readonly ToggleSwitch _swKeepDesktopSdr = new();
         private readonly ToggleSwitch _swAutoUpdate = new();
+        private readonly ToggleSwitch _swHdrList = new();
+        private readonly ToggleSwitch _swHdrSuggest = new();
         private ModernButton? _checkUpdatesButton;
+        private Label? _hdrListDesc;
+        private bool _hdrListBusy;
         private Label? _updateDesc;
         private readonly Stepper _fallback = new() { Minimum = 0, Maximum = 30 };
 
@@ -264,17 +268,21 @@ namespace SmartHdrManager
             page.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));    // buttons
 
             // Hint + count
-            var hintRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Margin = new Padding(0) };
+            var hintRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, Margin = new Padding(0) };
             hintRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             hintRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             hintRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             hintRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            var hint = new Label
+            hintRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            // Drawn on one line: a Label that runs out of room wraps, and its cut-off text sits above the row's middle
+            var hint = new Control
             {
                 Text = "Turn a game on to use HDR while it runs",
-                Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = false, AutoEllipsis = true, Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(2, 0, 0, 0)
+                Font = Theme.Small, ForeColor = Theme.Muted, Dock = DockStyle.Fill, Margin = new Padding(2, 0, 0, 0)
             };
+            hint.Paint += (_, e) => TextRenderer.DrawText(e.Graphics, hint.Text, hint.Font, hint.ClientRectangle, hint.ForeColor,
+                TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            hint.Resize += (_, _) => hint.Invalidate();
             var othersLabel = new Label
             {
                 Text = "Other programs", Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = true, Dock = DockStyle.Fill,
@@ -284,10 +292,22 @@ namespace SmartHdrManager
             _swShowOthers.Margin = new Padding(0);
             _toolTip.SetToolTip(_swShowOthers, "Also list programs found by the drive scan that are not in a game library");
             _toolTip.SetToolTip(othersLabel, "Also list programs found by the drive scan that are not in a game library");
+            // HDR games list (PCGamingWiki): which of your games support HDR, all in one place
+            var hdrListLink = new Label
+            {
+                Text = "HDR games…", Font = Theme.Small, ForeColor = Theme.Accent, AutoSize = true, Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleRight, Margin = new Padding(12, 0, 0, 0), Cursor = Cursors.Hand
+            };
+            hdrListLink.MouseEnter += (_, _) => hdrListLink.ForeColor = Theme.AccentHover;
+            hdrListLink.MouseLeave += (_, _) => hdrListLink.ForeColor = Theme.Accent;
+            hdrListLink.Click += async (_, _) => await OnShowHdrListAsync();
+            _toolTip.SetToolTip(hdrListLink, "Which of your games support HDR (from PCGamingWiki) – turn them on in one place");
             hintRow.Controls.Add(hint, 0, 0);
+            // The link after the count, so it stays in place when the count changes
             hintRow.Controls.Add(_gamesCount, 1, 0);
-            hintRow.Controls.Add(othersLabel, 2, 0);
-            hintRow.Controls.Add(_swShowOthers, 3, 0);
+            hintRow.Controls.Add(hdrListLink, 2, 0);
+            hintRow.Controls.Add(othersLabel, 3, 0);
+            hintRow.Controls.Add(_swShowOthers, 4, 0);
             page.Controls.Add(hintRow, 0, 0);
 
             // Search box: rounded field with a search icon
@@ -449,6 +469,16 @@ namespace SmartHdrManager
             Section("Display fixes", "Repairs side effects of leaving HDR.");
             Add(SettingRow("Reload color profile", "Re-applies your calibration after HDR (may need admin rights).", _swColorProfile), 68);
             Add(SettingRow("Refresh apps", "Fixes Chrome & co. looking dim after HDR.", _swRefreshApps), 68);
+
+            // ---- HDR games list ----
+            Section("HDR games list", "Which games support HDR, from PCGamingWiki. Downloaded from GitHub – nothing about you is sent.");
+            var hdrListRow = SettingRow("Mark games that support HDR", "Off – nothing is downloaded.", _swHdrList);
+            _hdrListDesc = RowDescription(hdrListRow);
+            Add(hdrListRow, 68);
+            Add(SettingRow("Suggest new games", "A notification when a newly installed game supports HDR.", _swHdrSuggest), 68);
+            var hdrListButton = new ModernButton { Text = "Show list", AutoSize = true };
+            hdrListButton.Click += async (_, _) => await OnShowHdrListAsync();
+            Add(SettingRow("HDR games on this PC", HdrDatabase.Attribution + " · turn them on in one place.", hdrListButton), 68);
 
             // ---- Updates ----
             Section("Updates", "Connects to GitHub only to check for updates. Nothing about you is sent.");
@@ -708,6 +738,19 @@ namespace SmartHdrManager
                     ? "Keep the desktop in SDR: on – HDR turned on by you or another program is switched back to SDR too."
                     : "Keep the desktop in SDR: off – only HDR that this app turned on is switched back.");
             };
+            _swHdrList.CheckedChanged += async (_, _) =>
+            {
+                if (_loadingSettings) return;
+                if (_swHdrList.Checked) await EnableHdrListAsync();
+                else
+                {
+                    _engine.Update(c => c.UseHdrDatabase = false);
+                    _engine.Log("HDRLIST", "HDR games list turned off.");
+                    UpdateHdrListDescription();
+                    RebuildGames();
+                }
+            };
+            _swHdrSuggest.CheckedChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.SuggestHdrForNewGames = _swHdrSuggest.Checked); };
             _swAutoUpdate.CheckedChanged += (_, _) =>
             {
                 if (_loadingSettings) return;
@@ -1126,11 +1169,208 @@ namespace SmartHdrManager
                 : $"{count} games excluded – undo it here.";
         }
 
+        // ------------------------------------------------------------------
+        // HDR games list (PCGamingWiki data, see HdrDatabase.cs)
+        // ------------------------------------------------------------------
+        /// <summary>Settings › HDR games list: "512 games in the list · updated 3 days ago".</summary>
+        private void UpdateHdrListDescription()
+        {
+            if (_hdrListDesc == null || IsDisposed) return;
+            if (_hdrListBusy) { _hdrListDesc.Text = "Downloading the list …"; return; }
+            var db = _engine.HdrList;
+            if (!_engine.Read(c => c.UseHdrDatabase)) { _hdrListDesc.Text = "Off – nothing is downloaded."; return; }
+            if (db == null) { _hdrListDesc.Text = "Not downloaded yet – see the Log tab."; return; }
+            DateTime? last = _engine.Read(c => c.HdrDatabaseCheckUtc);
+            string when = last == null ? "" : (DateTime.UtcNow - last.Value).TotalDays >= 2 ? $" · checked {(int)(DateTime.UtcNow - last.Value).TotalDays} days ago"
+                : (DateTime.UtcNow - last.Value).TotalHours >= 20 ? " · checked yesterday" : " · checked today";
+            _hdrListDesc.Text = $"{db.Count} games in the list{when} · updated weekly";
+        }
+
+        /// <summary>Turns the HDR games list on and downloads it now. False when it could not be downloaded.</summary>
+        private async Task<bool> EnableHdrListAsync()
+        {
+            // Turned on first: switching it off and on again during a download must still leave it on
+            if (!_engine.Read(c => c.UseHdrDatabase))
+            {
+                _engine.Update(c => c.UseHdrDatabase = true);
+                _engine.Log("HDRLIST", "HDR games list turned on.");
+            }
+            if (_hdrListBusy) return false;
+            _hdrListBusy = true;
+            UpdateHdrListDescription();
+            string? problem;
+            try { problem = await _engine.UpdateHdrDatabaseAsync(force: true); }
+            finally { _hdrListBusy = false; }
+            if (IsDisposed) return problem == null;
+            UpdateHdrListDescription();
+            RebuildGames();
+            if (problem != null && _engine.HdrList == null)
+            {
+                MessageBox.Show(this, $"The HDR games list could not be downloaded:\n{problem}\n\nThe app tries again later.",
+                    "HDR games list", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>Games › HDR games…: asks once to turn the list on, then shows the games on this PC that support HDR.</summary>
+        private async Task OnShowHdrListAsync()
+        {
+            if (!_engine.Read(c => c.UseHdrDatabase) || _engine.HdrList == null)
+            {
+                if (!_engine.Read(c => c.UseHdrDatabase))
+                {
+                    var answer = MessageBox.Show(this,
+                        "Smart HDR Manager can mark the games that support HDR, using a list from PCGamingWiki.\n\n" +
+                        "The list is downloaded from GitHub (once now, then at most once a week). Nothing about you or your games " +
+                        "is sent – your games are compared with the list on this PC. HDR is never turned on for a game without you.\n\n" +
+                        "Turn on the HDR games list? (Settings › HDR games list)",
+                        "HDR games list", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    if (answer != DialogResult.Yes) return;
+                }
+                _loadingSettings = true;
+                try { _swHdrList.Checked = true; }
+                finally { _loadingSettings = false; }
+                if (!await EnableHdrListAsync() || IsDisposed) return;
+            }
+            ShowHdrListDialog();
+        }
+
+        /// <summary>
+        /// The games on this PC that the HDR games list knows, like the Games tab: switch on = HDR for the game.
+        /// "HDR in game" first, then limited HDR and HDR with a mod (those often need a setting or a mod – see the wiki).
+        /// </summary>
+        private void ShowHdrListDialog()
+        {
+            using var dlg = new Form
+            {
+                Text = "HDR games",
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
+                BackColor = Theme.Back, ForeColor = Theme.Text, Font = Theme.Body,
+                Icon = _windowIcon, KeyPreview = true,
+                Padding = new Padding(16)
+            };
+            dlg.HandleCreated += (_, _) => Theme.StyleWindow(dlg.Handle);
+            dlg.KeyDown += (_, e) =>
+            {
+                if (e.KeyCode == Keys.Escape)
+                {
+                    dlg.DialogResult = DialogResult.Cancel;
+                    e.Handled = e.SuppressKeyPress = true;
+                }
+            };
+
+            dlg.SuspendLayout();
+            var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = new Padding(0) };
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));    // title + count
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));    // description
+            table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // the list
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));    // buttons
+
+            var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0) };
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            header.Controls.Add(new Label
+            {
+                Text = "HDR games on this PC", Font = Theme.Section, ForeColor = Theme.Text, Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, Margin = new Padding(2, 0, 0, 0)
+            }, 0, 0);
+            var count = new Label { AutoSize = true, Font = Theme.Small, ForeColor = Theme.Muted, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Margin = new Padding(12, 0, 2, 0) };
+            header.Controls.Add(count, 1, 0);
+            table.Controls.Add(header, 0, 0);
+
+            table.Controls.Add(new Label
+            {
+                Text = "Turn a game on to use HDR while it runs. \"Limited HDR\" and \"HDR with a mod\" may need a setting or a mod – " +
+                       "Wiki page shows how.  " + HdrDatabase.Attribution + ".",
+                Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = false, Dock = DockStyle.Fill, UseMnemonic = false,
+                TextAlign = ContentAlignment.TopLeft, AutoEllipsis = true, Margin = new Padding(2, 0, 2, 6)
+            }, 0, 1);
+
+            var listCard = new RoundedPanel { Radius = 12, BackColor = Theme.Surface, Dock = DockStyle.Fill, Margin = new Padding(0), Padding = new Padding(6) };
+            var list = new GameList { Dock = DockStyle.Fill };
+            var empty = new Label
+            {
+                Text = "None of your games is in the list yet.\n\"Scan games\" in the Games tab finds newly installed games.",
+                Font = Theme.Body, ForeColor = Theme.Muted, BackColor = Theme.Surface, Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleCenter, UseMnemonic = false
+            };
+            listCard.Controls.Add(list);
+            listCard.Controls.Add(empty);
+            table.Controls.Add(listCard, 0, 2);
+
+            var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(0, 12, 0, 0) };
+            var close = new ModernButton { Text = "Close", Primary = true, AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
+            var allOn = new ModernButton { Glyph = Theme.GlyphAdd, Text = "Turn on all with HDR in game", AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
+            var wiki = new ModernButton { Glyph = Theme.GlyphDocument, Text = "Wiki page", AutoSize = true, Margin = new Padding(0) };
+            using var tips = new ToolTip();
+            tips.SetToolTip(allOn, "HDR for every game marked \"HDR in game\" – limited HDR and HDR with a mod stay as they are");
+            tips.SetToolTip(wiki, "Open the selected game's page on PCGamingWiki: how to turn on its HDR, known issues, fixes");
+            buttons.Controls.Add(close);
+            buttons.Controls.Add(allOn);
+            buttons.Controls.Add(wiki);
+            table.Controls.Add(buttons, 0, 3);
+
+            void ShowItems()
+            {
+                var rows = _engine.GetHdrListRows().Select(r => new GameItem(r)).ToList();
+                list.SetItems(rows, list.SelectedItem?.Key);
+                list.Visible = rows.Count > 0;
+                empty.Visible = rows.Count == 0;
+                wiki.Enabled = rows.Count > 0;
+                allOn.Enabled = rows.Any(i => i.HdrSupport == HdrSupport.Native && !i.Hdr);
+                UpdateCount();
+            }
+            void UpdateCount()
+            {
+                int on = list.Items.Count(i => i.Hdr);
+                count.Text = (list.Items.Count == 1 ? "1 game" : $"{list.Items.Count} games") + $" · {on} with HDR";
+            }
+
+            list.HdrToggled += (_, item) =>
+            {
+                _engine.SetGameHdr(item.Processes, item.Hdr, item.Name);
+                allOn.Enabled = list.Items.Any(i => i.HdrSupport == HdrSupport.Native && !i.Hdr);
+                UpdateCount();
+            };
+            allOn.Click += (_, _) =>
+            {
+                var games = list.Items.Where(i => i.HdrSupport == HdrSupport.Native && !i.Hdr).ToList();
+                foreach (var item in games) _engine.SetGameHdr(item.Processes, true, item.Name);
+                _engine.Log("HDRLIST", $"HDR turned on for {games.Count} game(s) with HDR in game.");
+                ShowItems();
+            };
+            wiki.Click += (_, _) =>
+            {
+                if (list.SelectedItem is not GameItem item || item.HdrPage == null)
+                {
+                    MessageBox.Show(dlg, "Select a game in the list first.", dlg.Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                try { Process.Start(new ProcessStartInfo(item.HdrPage) { UseShellExecute = true })?.Dispose(); }
+                catch (Exception ex) { MessageBox.Show(dlg, ex.Message, dlg.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+            };
+            close.Click += (_, _) => dlg.DialogResult = DialogResult.OK;
+
+            dlg.Controls.Add(table);
+            dlg.AutoScaleDimensions = new SizeF(96F, 96F);
+            dlg.AutoScaleMode = AutoScaleMode.Dpi;
+            dlg.ClientSize = new Size(600, 540);
+            dlg.ResumeLayout(false);
+            ShowItems();
+            dlg.ShowDialog(this);
+
+            RebuildGames();
+        }
+
         private void OnLibraryChanged(object? sender, EventArgs e)
         {
             // Raised on a background thread
             if (IsDisposed || !IsHandleCreated) return;
-            try { BeginInvoke(new Action(() => { if (!IsDisposed) RebuildGames(); })); } catch { }
+            try { BeginInvoke(new Action(() => { if (!IsDisposed) { RebuildGames(); UpdateHdrListDescription(); } })); } catch { }
         }
 
         /// <summary>Per-game options dialog: delay before HDR turns on, keep HDR on after the game closes.</summary>
@@ -1832,6 +2072,9 @@ namespace SmartHdrManager
                 _fallback.Value = _engine.Read(c => c.SdrFallbackDelaySeconds);
                 _swKeepDesktopSdr.Checked = _engine.Read(c => c.KeepDesktopSdr);
                 _swAutoUpdate.Checked = _engine.Read(c => c.CheckForUpdatesAutomatically);
+                _swHdrList.Checked = _engine.Read(c => c.UseHdrDatabase);
+                _swHdrSuggest.Checked = _engine.Read(c => c.SuggestHdrForNewGames);
+                UpdateHdrListDescription();
 
                 _swVideoAuto.Checked = _engine.Read(c => c.VideoHdrAutomation);
                 _videoMode.SelectedIndex = Math.Max(0, Array.IndexOf(VideoModes, _engine.Read(c => VideoHdrModes.Normalize(c.VideoHdrMode))));

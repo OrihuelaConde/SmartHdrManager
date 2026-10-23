@@ -41,6 +41,8 @@ namespace SmartHdrManager
         public bool Hdr { get; init; }
         public bool HasOptions { get; init; }
         public bool Excluded { get; init; }                     // "Never HDR" (2.6.1: shown again so it can be undone)
+        public string? HdrSupport { get; init; }                // HDR games list: HdrSupport value, null = not in the list
+        public string? HdrPage { get; init; }                   // HDR games list: the game's PCGamingWiki page
     }
 
     /// <summary>
@@ -547,6 +549,7 @@ namespace SmartHdrManager
             var libraryThread = new Thread(() =>
             {
                 Thread.Sleep(3000);
+                if (Read(c => c.UseHdrDatabase)) _hdrDatabase = HdrDatabase.LoadCached(msg => Log("HDRLIST", msg));
                 if (!_stop) RefreshLibrary(fullRescan: false);
             })
             { IsBackground = true, Priority = ThreadPriority.BelowNormal, Name = "GameLibrary" };
@@ -632,6 +635,115 @@ namespace SmartHdrManager
         /// <summary>Raised (on a background thread) after the game library was refreshed.</summary>
         public event EventHandler? LibraryChanged;
 
+        // ------------------------------------------------------------------
+        // HDR games list (PCGamingWiki data, see HdrDatabase.cs)
+        // ------------------------------------------------------------------
+        private volatile HdrDatabase? _hdrDatabase;
+        private int _hdrDatabaseUpdating;
+
+        /// <summary>The HDR games list while Settings › HDR games list is on, otherwise null.</summary>
+        public HdrDatabase? HdrList
+        {
+            get
+            {
+                var db = _hdrDatabase;
+                return db != null && Read(c => c.UseHdrDatabase) ? db : null;
+            }
+        }
+
+        private HdrMatch? HdrMatchOf(LibraryGame game)
+        {
+            var db = _hdrDatabase;
+            return db != null && Config.UseHdrDatabase ? db.Find(game) : null;
+        }
+
+        /// <summary>
+        /// Downloads the HDR games list when it is on and due (at most once a week; force: now). Returns null when it
+        /// worked or was not due, otherwise why it failed. The saved list is used until the download works.
+        /// </summary>
+        public async Task<string?> UpdateHdrDatabaseAsync(bool force)
+        {
+            bool enabled = Read(c => c.UseHdrDatabase);
+            DateTime? last = Read(c => c.HdrDatabaseCheckUtc);
+            if (_hdrDatabase == null && enabled) _hdrDatabase = HdrDatabase.LoadCached(msg => Log("HDRLIST", msg));
+            if (!enabled || (!force && _hdrDatabase != null && last != null && DateTime.UtcNow - last.Value < TimeSpan.FromDays(7)))
+                return null;
+            // Already downloading (e.g. the weekly check): a forced update from the window must not look like it worked
+            if (Interlocked.Exchange(ref _hdrDatabaseUpdating, 1) == 1)
+                return force ? "The list is being downloaded right now – try again in a moment." : null;
+            try
+            {
+                var db = await HdrDatabase.DownloadAsync(CancellationToken.None).ConfigureAwait(false);
+                bool changed = _hdrDatabase == null || _hdrDatabase.Generated != db.Generated || _hdrDatabase.Count != db.Count;
+                _hdrDatabase = db;
+                Update(c => c.HdrDatabaseCheckUtc = DateTime.UtcNow);
+                Log("HDRLIST", $"HDR games list: {db.Count} games (PCGamingWiki, built {db.Generated}).");
+                if (changed) LibraryChanged?.Invoke(this, EventArgs.Empty);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Log("HDRLIST", $"The HDR games list could not be downloaded: {ex.Message}");
+                return ex.Message;
+            }
+            finally
+            {
+                Volatile.Write(ref _hdrDatabaseUpdating, 0);
+            }
+        }
+
+        /// <summary>
+        /// Library games that the HDR games list knows, for Games › HDR games: games with HDR in game first, then
+        /// limited HDR and HDR with a mod. "Never HDR" games are left out. Empty while the list is off.
+        /// </summary>
+        public List<GameRow> GetHdrListRows()
+        {
+            lock (Sync)
+            {
+                var rows = new List<GameRow>();
+                if (_hdrDatabase == null || !Config.UseHdrDatabase) return rows;
+                var hdr = new HashSet<string>(Config.HdrGamesAndApps ?? new List<string>(), Cmp);
+                var ignored = new HashSet<string>(Config.IgnoredGames ?? new List<string>(), Cmp);
+                var paths = Config.ProgramPaths ?? new Dictionary<string, string>();
+
+                foreach (var game in Config.LibraryGames ?? new List<LibraryGame>())
+                {
+                    var procs = game.Processes.Where(p => !ignored.Contains(p)).ToList();
+                    var match = procs.Count > 0 ? HdrMatchOf(game) : null;
+                    if (match == null) continue;
+                    rows.Add(new GameRow
+                    {
+                        Key = game.Id,
+                        Name = game.Name,
+                        Subtitle = $"{game.Source}  ·  {HdrSupport.Describe(match.Support)}" + (match.ByName ? "  ·  matched by name" : string.Empty),
+                        Processes = procs,
+                        ExePath = game.ExePath ?? procs.Select(p => paths.TryGetValue(p, out var known) ? known : null)
+                                                      .FirstOrDefault(p => p != null),
+                        Hdr = procs.Any(hdr.Contains),
+                        HdrSupport = match.Support,
+                        HdrPage = match.PageUrl
+                    });
+                }
+
+                int Rank(string support) => support == HdrSupport.Native ? 0 : support == HdrSupport.Limited ? 1 : 2;
+                return rows.OrderBy(r => Rank(r.HdrSupport!)).ThenBy(r => r.Name, Cmp).ToList();
+            }
+        }
+
+        /// <summary>Newly found library games with HDR in game or limited HDR that are not on yet. Caller holds Sync.</summary>
+        private List<string> NewGamesWithHdr(List<LibraryGame> oldGames, List<LibraryGame> newGames)
+        {
+            if (oldGames.Count == 0 || !Config.SuggestHdrForNewGames || _hdrDatabase == null || !Config.UseHdrDatabase) return new List<string>();
+            var known = new HashSet<string>(oldGames.Select(g => g.Id), Cmp);
+            var hdr = new HashSet<string>(Config.HdrGamesAndApps ?? new List<string>(), Cmp);
+            var ignored = new HashSet<string>(Config.IgnoredGames ?? new List<string>(), Cmp);
+            return newGames
+                .Where(g => !known.Contains(g.Id) && !g.Processes.Any(hdr.Contains) && !g.Processes.Any(ignored.Contains))
+                .Where(g => HdrMatchOf(g)?.Support is HdrSupport.Native or HdrSupport.Limited)
+                .Select(g => g.Name)
+                .ToList();
+        }
+
         private readonly object _libraryLock = new();
 
         public void RefreshLibrary(bool fullRescan)
@@ -651,8 +763,10 @@ namespace SmartHdrManager
                 var games = GameLibraryScanner.Scan(previous, msg => Log("SCAN", msg));
                 var knownPaths = GameLibraryScanner.FindKnownExePaths();
                 int iconsFound = 0;
+                List<string> newWithHdr;
                 lock (Sync)
                 {
+                    newWithHdr = NewGamesWithHdr(Config.LibraryGames ?? new List<LibraryGame>(), games);
                     MergeLearnedLaunchers(games);
                     CarryOverGameSettings(Config.LibraryGames ?? new List<LibraryGame>(), games);
                     Config.LibraryGames = games;
@@ -678,6 +792,13 @@ namespace SmartHdrManager
                 if (iconsFound > 0) Log("SCAN", $"Program locations found for {iconsFound} program(s) (icons).");
                 Log("SCAN", $"Game library: {games.Count} games found (Steam, Epic, GOG, Xbox, Ubisoft, EA, Rockstar).");
                 LibraryChanged?.Invoke(this, EventArgs.Empty);
+                if (newWithHdr.Count > 0)
+                {
+                    Log("HDRLIST", $"New game(s) that support HDR: {string.Join(", ", newWithHdr)} – turn them on in Games › HDR games.");
+                    _notifications.Enqueue(newWithHdr.Count == 1
+                        ? ($"{newWithHdr[0]} supports HDR", "Turn HDR on for it in the Games tab › HDR games.")
+                        : ($"{newWithHdr.Count} new games support HDR", "Turn HDR on for them in the Games tab › HDR games."));
+                }
             }
             catch (Exception ex)
             {
@@ -2685,18 +2806,22 @@ namespace SmartHdrManager
                     covered.UnionWith(game.Processes);
                     var procs = game.Processes.Where(p => !ignored.Contains(p)).ToList();
                     if (procs.Count == 0) continue;
+                    var match = HdrMatchOf(game);   // HDR games list (when on): "Steam · witcher3.exe · HDR in game"
 
                     rows.Add(new GameRow
                     {
                         Key = game.Id,
                         Name = game.Name,
-                        Subtitle = procs.Count > 1 ? $"{game.Source}  ·  {procs[0]}.exe +{procs.Count - 1}" : $"{game.Source}  ·  {procs[0]}.exe",
+                        Subtitle = (procs.Count > 1 ? $"{game.Source}  ·  {procs[0]}.exe +{procs.Count - 1}" : $"{game.Source}  ·  {procs[0]}.exe") +
+                                   (match != null ? $"  ·  {HdrSupport.Describe(match.Support)}" : string.Empty),
                         Processes = procs,
                         // library path, or one learned from the drive scan / a running game (e.g. Xbox games)
                         ExePath = game.ExePath ?? procs.Select(p => paths.TryGetValue(p, out var known) ? known : null)
                                                       .FirstOrDefault(p => p != null),
                         Hdr = procs.Any(hdr.Contains),
-                        HasOptions = HasOptions(procs)
+                        HasOptions = HasOptions(procs),
+                        HdrSupport = match?.Support,
+                        HdrPage = match?.PageUrl
                     });
                 }
 

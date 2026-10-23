@@ -31,6 +31,8 @@ namespace SmartHdrManager
         private const int UpdateCheckEveryMs = 6 * 3600 * 1000;
         private long _nextUpdateCheckMs = Environment.TickCount64 + 60000;
         private bool _updateCheckRunning;
+        // HDR games list (Settings › HDR games list, off by default): downloaded at most once a week
+        private long _nextHdrListCheckMs = Environment.TickCount64 + 90000;
 
         public TrayAppContext(HdrEngine engine, EventWaitHandle showEvent, CommandEvents commands, CliCommand startCommand, bool startHidden,
                               bool justUpdated)
@@ -227,6 +229,11 @@ namespace SmartHdrManager
             {
                 _nextUpdateCheckMs = Environment.TickCount64 + UpdateCheckEveryMs;
                 _ = AutoCheckForUpdateAsync();
+            }
+            if (Environment.TickCount64 >= _nextHdrListCheckMs)
+            {
+                _nextHdrListCheckMs = Environment.TickCount64 + UpdateCheckEveryMs;
+                _ = _engine.UpdateHdrDatabaseAsync(force: false);
             }
 
             // Only does anything if the app was built as a console exe (see ConsoleWindowHider)

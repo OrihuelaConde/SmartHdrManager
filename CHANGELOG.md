@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **HDR games list** (optional, off by default): *Games › HDR games…* shows which of your games support HDR – *HDR in game*, *limited HDR* or *HDR with a mod* – using [PCGamingWiki](https://www.pcgamingwiki.com) data (CC BY-NC-SA 3.0). Turn them on one by one or with **Turn on all with HDR in game**; **Wiki page** opens the game's PCGamingWiki page. The Games tab shows the same mark under each game, and *Suggest new games* sends a notification when a newly installed game supports HDR. Nothing is turned on without you.
+  - Turned on in *Settings › HDR games list* (or when you first open *HDR games…*). The app then downloads one file from this project's release *hdr-db* on github.com, at most once a week, and compares it with your games on your PC – nothing is sent.
+  - Steam and GOG games are matched by their id, other games by name.
+  - The list is built once a week by the GitHub workflow *HDR games list* (`hdr-database.ps1`, also runs on your own PC).
+
 ## 2.6.1 – 2026-10
 
 ### Fixed

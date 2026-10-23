@@ -152,6 +152,11 @@ namespace SmartHdrManager
         public bool CheckForUpdatesAutomatically { get; set; } = false;
         public DateTime? LastUpdateCheckUtc { get; set; }
         public string? LastNotifiedVersion { get; set; }          // the automatic check mentions each version only once
+        // HDR games list (PCGamingWiki data, downloaded from GitHub once a week). Off by default: no internet connection
+        // unless asked for. It only marks games and suggests them – HDR is never turned on for a game without you.
+        public bool UseHdrDatabase { get; set; } = false;
+        public DateTime? HdrDatabaseCheckUtc { get; set; }
+        public bool SuggestHdrForNewGames { get; set; } = true;   // notification when a newly installed game supports HDR
         // Games that closed within seconds after HDR was switched on for them (possible crash, e.g. with NVIDIA RTX HDR)
         public Dictionary<string, int> QuickExitCounts { get; set; } = new();
 

@@ -1,0 +1,76 @@
+# HDR games list (Games > HDR games): downloads which games support HDR from PCGamingWiki once a week and
+# publishes hdr-games.json as an asset of the release "hdr-db". The app downloads that file from github.com.
+# The release is a pre-release, so it never counts as the "latest" version for "Check for updates".
+#
+# A push that changes the script or this file only builds the list (as a workflow artifact) to check it works.
+name: HDR games list
+
+on:
+  schedule:
+    - cron: '23 4 * * 1'   # Mondays, 04:23 UTC
+  workflow_dispatch:
+  push:
+    paths:
+      - 'hdr-database.ps1'
+      - '.github/workflows/hdr-database.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hdr-database
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download the list from PCGamingWiki
+        shell: pwsh
+        run: ./hdr-database.ps1 -Output hdr-games.json
+
+      - name: Keep the file as a workflow artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: hdr-games
+          path: hdr-games.json
+
+  publish:
+    needs: build
+    # Scheduled runs always use the default branch (and their event has no repository data);
+    # a manual run publishes only from the default branch. Pushes never publish.
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # only this job can create / update the release
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: hdr-games
+
+      - name: Publish it on the release "hdr-db"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          if ! gh release view hdr-db >/dev/null 2>&1; then
+            printf '%s\n' \
+              'Which PC games support HDR, for **Games > HDR games** in Smart HDR Manager. Updated once a week by the workflow "HDR games list".' \
+              '' \
+              'Data: [PCGamingWiki](https://www.pcgamingwiki.com), licensed under [CC BY-NC-SA 3.0](https://creativecommons.org/licenses/by-nc-sa/3.0/). `hdr-games.json` keeps that license (not the MIT license of the app).' \
+              > notes.md
+            gh release create hdr-db --title 'HDR games list' --notes-file notes.md --prerelease --latest=false --target "$GITHUB_SHA"
+          fi
+          # Only upload when the games changed (the "generated" date alone is no reason)
+          if gh release download hdr-db --pattern hdr-games.json --output old.json 2>/dev/null &&
+             [ "$(jq -cS .games old.json)" = "$(jq -cS .games hdr-games.json)" ]; then
+            echo 'The list did not change.'
+          else
+            gh release upload hdr-db hdr-games.json --clobber
+            echo "Published $(jq '.games | length' hdr-games.json) games."
+          fi

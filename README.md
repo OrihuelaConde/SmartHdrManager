@@ -57,6 +57,8 @@ When the content ends, the app waits a few seconds (Settings › Back to SDR ›
 
 **Games tab:** **Scan games** re-reads the game libraries and your drives. **Add program** / **Add running** adds any other program. **Options** sets a per-game delay before HDR (for games that crash or flicker if HDR switches during startup), how long HDR stays on after the game closes, and **Launch with HDR** (see below). **Never HDR** hides a game and never uses HDR for it – undo it in *Settings › General › Never HDR games*, or search for the game in the Games tab and turn it on again.
 
+**HDR games list** (optional, off by default): *Games › HDR games…* (or *Settings › HDR games list*) shows which of your games support HDR, using the data of [PCGamingWiki](https://www.pcgamingwiki.com) – *HDR in game*, *limited HDR* or *HDR with a mod*. Turn games on there one by one, or click **Turn on all with HDR in game**; **Wiki page** opens the game's PCGamingWiki page (how to turn on its HDR, known issues, fixes). The Games tab shows the same mark under each game's name, and *Suggest new games* sends a notification when a newly installed game supports HDR. HDR is never turned on for a game without you: a game with an HDR option can still have a poor HDR picture, and games without one may still look good with Windows Auto HDR or NVIDIA RTX HDR. Games are matched by Steam / GOG id, other games by name.
+
 **Tray menu:** open the window, **SDR for this video** (only shown while a video uses HDR: back to SDR until that video stops – the next video switches as usual; *HDR for videos again* ends it early), pause automation, **HDR override** (force HDR on or SDR for a while), exit.
 
 **Keyboard shortcuts** (Settings › Keyboard shortcuts – Win+Alt, Ctrl+Alt or off):
@@ -206,6 +208,7 @@ Settings › YouTube in browser shows **Browser script: Detected ✓** once the 
 ## Safety and privacy
 
 - No telemetry, no ads, and no internet connection – except when you click **Check for updates** (or turn on the weekly check, off by default): then the app asks `api.github.com` for the latest release of this project and, if you click *Update now*, downloads it from `github.com`. Nothing about you or your PC is sent. The download is only installed if its SHA256 matches the release's `SHA256SUMS.txt`.
+- **HDR games list** (off by default): when you turn it on, the app downloads one file, `hdr-games.json`, from this project's release *hdr-db* on `github.com` – once then, and at most once a week after that. The whole list is downloaded and compared with your games on your PC; your games are never sent anywhere. The list is built once a week from PCGamingWiki by this project's GitHub workflow (`hdr-database.ps1`) and saved next to `config.json`.
 - **Anti-cheat safe:** the app never reads or changes game memory and injects nothing. It only reads process names and window titles, like Task Manager does.
 - Some antivirus programs may be suspicious of an unsigned tray app that watches running programs and has global keyboard shortcuts. The release notes link a VirusTotal scan of exactly these files.
 - **Can the browser script make the app run code?** No. The script only changes the tab title; the app only checks whether a window title *contains* the marker text. Nothing from a title is executed or written anywhere. Any website can set any tab title anyway, so the worst a malicious script or site could do is switch HDR on. The app itself only ever starts Notepad (when you click *Open config.json / log file*), a fixed Windows colour-profile task (off by default), itself (*Start with Windows*, and the new version after *Update now*) and – with *Launch with HDR* / the Apps tab – the game or player named in your own shortcut, Steam launch option, right-click entry or "(with HDR)" app.
@@ -269,3 +272,5 @@ Please open an [issue on GitHub](https://github.com/VantaCode420/SmartHdrManager
 ## License
 
 MIT – see `LICENSE.txt`.
+
+The HDR games list (`hdr-games.json`, release *hdr-db*) is made from [PCGamingWiki](https://www.pcgamingwiki.com) data and is licensed under [CC BY-NC-SA 3.0](https://creativecommons.org/licenses/by-nc-sa/3.0/), not MIT.

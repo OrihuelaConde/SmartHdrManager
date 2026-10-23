@@ -851,6 +851,8 @@ namespace SmartHdrManager
             Hdr = row.Hdr;
             HasOptions = row.HasOptions;
             Excluded = row.Excluded;
+            HdrSupport = row.HdrSupport;
+            HdrPage = row.HdrPage;
         }
 
         public string Key { get; }
@@ -861,6 +863,8 @@ namespace SmartHdrManager
         public bool Hdr { get; set; }
         public bool HasOptions { get; set; }
         public bool Excluded { get; }      // "Never HDR" row (only shown while searching)
+        public string? HdrSupport { get; } // HDR games list: HdrSupport value, null = not in the list
+        public string? HdrPage { get; }    // HDR games list: the game's PCGamingWiki page
         public override string ToString() => Name;
     }
 
