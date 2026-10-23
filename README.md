@@ -18,11 +18,10 @@ Turns Windows HDR on automatically when you need it – HDR games, HDR videos on
 
 | File | Size | Use it if … |
 |---|---|---|
-| `SmartHdrManager-v…-win-x64-setup.exe` | large | **You are not sure.** Installer: Start menu entry, optional *Start with Windows*, uninstall from *Settings › Apps*. No administrator rights, nothing else to install. |
+| `SmartHdrManager-v…-setup.exe` | large | **You are not sure.** Installer for x64 and Windows on ARM (picks the right version): Start menu entry, optional *Start with Windows*, uninstall from *Settings › Apps*. No administrator rights, nothing else to install. |
 | `SmartHdrManager-v…-win-x64-standalone.zip` | large | You prefer a folder you unzip yourself (portable). Runs on any 64-bit Windows 10/11, nothing else to install. |
 | `SmartHdrManager-v…-win-x64.zip` | small | You already have the **.NET 10 Desktop Runtime** installed ([download](https://dotnet.microsoft.com/download/dotnet/10.0) → ".NET Desktop Runtime", x64). |
-| `SmartHdrManager-v…-win-arm64-setup.exe` | large | *Experimental, untested.* Installer for Windows on ARM (e.g. Snapdragon X laptops). |
-| `SmartHdrManager-v…-win-arm64-standalone.zip` | large | *Experimental, untested.* Windows on ARM, unzipped by hand, nothing else to install. |
+| `SmartHdrManager-v…-win-arm64-standalone.zip` | large | *Experimental, untested.* Windows on ARM (e.g. Snapdragon X laptops), nothing else to install. |
 | `SmartHdrManager-v…-win-arm64.zip` | small | *Experimental, untested.* Windows on ARM with the .NET 10 Desktop Runtime **Arm64** installed. |
 
 Not sure if your PC is ARM? *Settings › System › About › System type* says "ARM-based processor" on ARM PCs – everyone else takes x64.

@@ -6,11 +6,13 @@
 #   SmartHdrManager-vX.Y.Z-win-x64-standalone    larger exe, runs on any 64-bit Windows 10/11
 #   SmartHdrManager-vX.Y.Z-win-arm64             small exe for Windows on ARM, needs the .NET 10 Desktop Runtime (Arm64)
 #   SmartHdrManager-vX.Y.Z-win-arm64-standalone  larger exe for Windows on ARM, nothing to install
-# plus a .zip of each, an installer per architecture and SHA256 checksums:
-#   SmartHdrManager-vX.Y.Z-win-x64-setup.exe     installs the x64 standalone version (per user, no admin rights)
-#   SmartHdrManager-vX.Y.Z-win-arm64-setup.exe   installs the ARM64 standalone version
+# plus a .zip of each, an installer and SHA256 checksums:
+#   SmartHdrManager-vX.Y.Z-setup.exe             installs the standalone version that fits the PC, x64 or ARM64
+#                                                (per user, no admin rights)
+# With -Arch x64 / -Arch arm64 the installer holds that architecture only:
+#   SmartHdrManager-vX.Y.Z-win-x64-setup.exe / SmartHdrManager-vX.Y.Z-win-arm64-setup.exe
 #
-# The installers need Inno Setup 6.6 or newer (winget install JRSoftware.InnoSetup.7). Without it, or with
+# The installer needs Inno Setup 6.6 or newer (winget install JRSoftware.InnoSetup.7). Without it, or with
 # -NoInstaller, only the zips are built.
 #
 # Only whitelisted files are copied (exe, README, CHANGELOG, LICENSE, userscript), so your own
@@ -143,14 +145,18 @@ foreach ($p in $packages) {
     Compress-Archive -Path (Join-Path $dest '*') -DestinationPath (Join-Path $Output "$($p.Name).zip") -CompressionLevel Optimal
 }
 
-# ---- installers (standalone version: nothing else to install) ----
+# ---- installer (standalone version: nothing else to install) ----
 if ($iscc) {
-    foreach ($a in $archs) {
-        Step "Building the installer for win-$a"
-        $packageDir = Join-Path $Output "SmartHdrManager-v$version-win-$a-standalone"
-        & $iscc '/Qp' "/DArch=$a" "/DAppVersion=$version" "/DSourceDir=$packageDir" "/DOutputDir=$fullOut" $iss
-        if ($LASTEXITCODE -ne 0) { Fail "Installer build failed (win-$a). See the messages above." }
+    $standalone = { param($a) Join-Path $Output "SmartHdrManager-v$version-win-$a-standalone" }
+    if ($Arch -eq 'all') {
+        Step 'Building the installer (x64 + ARM64)'
+        & $iscc '/Qp' '/DArch=all' "/DAppVersion=$version" "/DSourceDirX64=$(& $standalone 'x64')" "/DSourceDirArm64=$(& $standalone 'arm64')" "/DOutputDir=$fullOut" $iss
     }
+    else {
+        Step "Building the installer for win-$Arch"
+        & $iscc '/Qp' "/DArch=$Arch" "/DAppVersion=$version" "/DSourceDir=$(& $standalone $Arch)" "/DOutputDir=$fullOut" $iss
+    }
+    if ($LASTEXITCODE -ne 0) { Fail 'Installer build failed. See the messages above.' }
 }
 
 # ---- checksums ----
@@ -176,5 +182,5 @@ Get-ChildItem $Output -Recurse -File | ForEach-Object {
 Write-Host ''
 Write-Host 'Before publishing:' -ForegroundColor Yellow
 Write-Host '  1. Run the exes you can run once and do the quick test (ARM64 exes only start on Windows on ARM).'
-Write-Host '  2. Upload the zips and setup.exe files to https://www.virustotal.com and keep the report links for your release notes.'
-Write-Host "  3. Attach the zips, the setup.exe files and $sumsName to the release."
+Write-Host '  2. Upload the zips and the setup.exe to https://www.virustotal.com and keep the report links for your release notes.'
+Write-Host "  3. Attach the zips, the setup.exe and $sumsName to the release."

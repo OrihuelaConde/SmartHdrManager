@@ -1,15 +1,17 @@
 ﻿; ---------------------------------------------------------------------------
 ; Smart HDR Manager - Windows installer (Inno Setup 6.6 or newer, Inno Setup 7 included)
 ;
-; release.ps1 builds the installers next to the zips:
-;   SmartHdrManager-vX.Y.Z-win-x64-setup.exe     installs the x64 standalone build
-;   SmartHdrManager-vX.Y.Z-win-arm64-setup.exe   installs the ARM64 standalone build
+; release.ps1 builds the installer next to the zips:
+;   SmartHdrManager-vX.Y.Z-setup.exe             x64 and ARM64: installs the standalone build that fits the PC
+;   SmartHdrManager-vX.Y.Z-win-x64-setup.exe     with release.ps1 -Arch x64: the x64 standalone build only
+;   SmartHdrManager-vX.Y.Z-win-arm64-setup.exe   with release.ps1 -Arch arm64: the ARM64 standalone build only
 ;
 ; Per user, no administrator rights: the app goes to %LocalAppData%\Programs\Smart HDR Manager, so
 ; "Check for updates" can replace the exe like in an unzipped copy. Settings stay in %AppData%\SmartHdrManager.
 ;
-; By hand (SOURCE_DIR = a standalone package folder made by release.ps1):
-;   ISCC.exe /DArch=x64 /DSourceDir="SOURCE_DIR" installer\SmartHdrManager.iss
+; By hand (the folders are standalone package folders made by release.ps1):
+;   ISCC.exe /DArch=all /DSourceDirX64="X64_DIR" /DSourceDirArm64="ARM64_DIR" installer\SmartHdrManager.iss
+;   ISCC.exe /DArch=x64 /DSourceDir="X64_DIR" installer\SmartHdrManager.iss
 ; Optional: /DAppVersion=X.Y.Z (default: the version of SmartHdrManager.exe), /DOutputDir="FOLDER" (default: installer\Output).
 ; The file is UTF-8 with BOM (Inno Setup needs the BOM for the translated messages).
 ; ---------------------------------------------------------------------------
@@ -18,19 +20,30 @@
   #error Inno Setup 6.6 or newer is required (https://jrsoftware.org/isdl.php)
 #endif
 
-#ifndef SourceDir
-  #error Define SourceDir: the folder with SmartHdrManager.exe, README.md, LICENSE.txt and the userscript (see the top of this file)
-#endif
 #ifndef Arch
   #define Arch "x64"
 #endif
-#if Arch == "x64"
-  ; Also installs on Windows 11 on Arm (x64 emulation); the arm64 installer is the better fit there
-  #define ArchAllowed "x64compatible"
-#elif Arch == "arm64"
-  #define ArchAllowed "arm64"
+#if Arch == "all"
+  #if !Defined(SourceDirX64) || !Defined(SourceDirArm64)
+    #error Arch=all needs SourceDirX64 and SourceDirArm64: the two standalone package folders (see the top of this file)
+  #endif
+  ; README, LICENSE etc. are the same in both packages
+  #define SourceDir SourceDirX64
+  #define ArchAllowed "x64compatible or arm64"
+  #define SetupSuffix "-setup"
 #else
-  #error Arch must be x64 or arm64
+  #ifndef SourceDir
+    #error Define SourceDir: the folder with SmartHdrManager.exe, README.md, LICENSE.txt and the userscript (see the top of this file)
+  #endif
+  #if Arch == "x64"
+    ; Also installs on Windows 11 on Arm (x64 emulation); the arm64 or combined installer is the better fit there
+    #define ArchAllowed "x64compatible"
+  #elif Arch == "arm64"
+    #define ArchAllowed "arm64"
+  #else
+    #error Arch must be all, x64 or arm64
+  #endif
+  #define SetupSuffix "-win-" + Arch + "-setup"
 #endif
 #ifndef AppVersion
   #define VerMajor
@@ -78,7 +91,7 @@ ArchitecturesInstallIn64BitMode={#ArchAllowed}
 MinVersion=10.0
 SourceDir=..
 OutputDir={#OutputDir}
-OutputBaseFilename=SmartHdrManager-v{#AppVersion}-win-{#Arch}-setup
+OutputBaseFilename=SmartHdrManager-v{#AppVersion}{#SetupSuffix}
 SetupIconFile=app.ico
 WizardStyle=modern dynamic
 Compression=lzma2/max
@@ -125,7 +138,13 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "autostart"; Description: "{cm:AutostartTask}"; GroupDescription: "{cm:StartupGroup}"; Check: not IsAdminInstallMode and not IsUpgrade
 
 [Files]
+#if Arch == "all"
+; x64 first: PrepareToInstall extracts the first SmartHdrManager.exe entry (it also runs on Windows 11 on Arm)
+Source: "{#SourceDirX64}\{#AppExe}"; DestDir: "{app}"; Check: not IsArm64; Flags: ignoreversion
+Source: "{#SourceDirArm64}\{#AppExe}"; DestDir: "{app}"; Check: IsArm64; Flags: ignoreversion
+#else
 Source: "{#SourceDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
+#endif
 Source: "{#SourceDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#SourceDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
