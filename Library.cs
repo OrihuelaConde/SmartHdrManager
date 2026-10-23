@@ -29,6 +29,12 @@ namespace SmartHdrManager
             "1493710",  // Proton Experimental
         };
 
+        // Steam app types (appinfo.vdf › common › type) that are not games
+        private static readonly HashSet<string> SteamNonGameTypes = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "application", "tool", "video", "music", "config", "dlc", "series", "episode", "hardware", "media", "comic"
+        };
+
         private static readonly string[] NonGameNameParts =
         {
             "redistributable", "proton", "steam linux runtime", "dedicated server", "soundtrack", " sdk", "benchmark tool"
@@ -60,8 +66,9 @@ namespace SmartHdrManager
         };
 
         // Bumped when the exe detection changes, so cached library entries are detected again once after an update
-        // (2: launcher check + several exes per game, 3: extra exes must belong to the game by name – 2.5.2).
-        public const int CurrentScanVersion = 3;
+        // (2: launcher check + several exes per game, 3: extra exes must belong to the game by name – 2.5.2,
+        // 4: Steam exes from the launch options in appinfo.vdf).
+        public const int CurrentScanVersion = 4;
 
         // Executables found earlier, by game id: reused when the main exe still exists, so a quick refresh
         // does not have to search every install folder again (a full rescan passes null).
@@ -116,7 +123,8 @@ namespace SmartHdrManager
         }
 
         // ------------------------------------------------------------------
-        // Steam: libraryfolders.vdf -> steamapps\appmanifest_*.acf -> steamapps\common\<installdir>
+        // Steam: libraryfolders.vdf -> steamapps\appmanifest_*.acf -> steamapps\common\<installdir>;
+        // the exe from the game's launch options in appcache\appinfo.vdf, else searched in the install folder
         // ------------------------------------------------------------------
         private static IEnumerable<LibraryGame> ScanSteam()
         {
@@ -134,6 +142,7 @@ namespace SmartHdrManager
                     libraries.Add(m.Groups[1].Value.Replace("\\\\", "\\"));
             }
 
+            var installed = new List<(uint AppId, string Name, string InstallDir, string Folder)>();
             foreach (string library in libraries.Distinct(StringComparer.OrdinalIgnoreCase))
             {
                 string steamapps = Path.Combine(library, "steamapps");
@@ -147,23 +156,196 @@ namespace SmartHdrManager
                     string appId = AcfValue(text, "appid");
                     string name = AcfValue(text, "name");
                     string installDir = AcfValue(text, "installdir");
-                    if (appId.Length == 0 || name.Length == 0 || installDir.Length == 0) continue;
+                    if (!uint.TryParse(appId, out uint id) || name.Length == 0 || installDir.Length == 0) continue;
                     if (SteamNonGameAppIds.Contains(appId) || IsNonGameName(name)) continue;
 
                     string folder = Path.Combine(steamapps, "common", installDir);
-                    if (!Directory.Exists(folder)) continue;
-
-                    string id = $"steam:{appId}";
-                    if (TryReuse(id, name, "Steam", out var cached))
-                    {
-                        yield return cached;
-                        continue;
-                    }
-
-                    var exes = FindGameExecutables(folder, name, installDir);
-                    yield return Make(id, name, "Steam", exes);
+                    if (Directory.Exists(folder)) installed.Add((id, name, installDir, folder));
                 }
             }
+
+            // Launch options of the games that are not cached yet (read once, only for those apps)
+            Dictionary<uint, SteamAppInfo.App>? launch = null;
+            var toDetect = installed.Where(g => !CanReuse($"steam:{g.AppId}")).Select(g => g.AppId).ToHashSet();
+            if (toDetect.Count > 0)
+            {
+                string appinfo = Path.Combine(steamPath, "appcache", "appinfo.vdf");
+                try
+                {
+                    if (File.Exists(appinfo)) launch = SteamAppInfo.ReadApps(appinfo, toDetect);
+                }
+                catch (Exception ex)
+                {
+                    _log?.Invoke($"Steam: appinfo.vdf could not be read ({ex.Message}) – searching the install folders instead.");
+                }
+            }
+
+            foreach (var (appId, name, installDir, folder) in installed)
+            {
+                string id = $"steam:{appId}";
+                if (TryReuse(id, name, "Steam", out var cached))
+                {
+                    yield return cached;
+                    continue;
+                }
+
+                SteamAppInfo.App? app = null;
+                launch?.TryGetValue(appId, out app);
+                // Software, videos, soundtracks … that Steam installs like games (e.g. a budget app, a trailer)
+                if (app != null && SteamNonGameTypes.Contains(app.Type)) continue;
+
+                var exes = app != null && app.Executables.Count > 0
+                    ? SteamLaunchExes(id, name, folder, installDir, app.Executables)
+                    : FindGameExecutables(folder, name, installDir);
+                yield return Make(id, name, "Steam", exes);
+            }
+        }
+
+        /// <summary>
+        /// Executables from a Steam game's launch options (up to 3, e.g. DX11 / DX12 versions). Launchers, tools and
+        /// files that do not exist are skipped; when only a launcher is left, the install folder is searched instead.
+        /// </summary>
+        private static List<string> SteamLaunchExes(string id, string name, string folder, string installDir, List<string> relative)
+        {
+            var existing = new List<string>();
+            foreach (string r in relative)
+            {
+                string full;
+                try { full = Path.GetFullPath(Path.Combine(folder, r)); } catch { continue; }   // "bin\.\game.exe" → "bin\game.exe"
+                if (File.Exists(full) && !IsExcludedExe(Path.GetFileNameWithoutExtension(full)) &&
+                    !existing.Contains(full, StringComparer.OrdinalIgnoreCase)) existing.Add(full);
+            }
+            if (existing.Count == 0) return FindGameExecutables(folder, name, installDir);
+
+            // A launcher as the default option (Paradox's dowser.exe, PlayLAN.exe …): the next option, or the folder search
+            var games = existing.Where(p => !LooksLikeLauncher(p)).ToList();
+            if (games.Count == 0) return RegisteredOrFound(id, name, "Steam", existing[0], folder, installDir);
+            // A settings tool as the default option (JadeEmpireConfig.exe): the game's own option comes first
+            MoveGameFirst(games);
+
+            // Further options only when they clearly belong to the game (not an editor, a comic or a tool it also ships):
+            // Steam already lists them, so a shorter shared start is enough ("iw3mp" next to "iw3sp")
+            string nameKey = Normalize(name), dirKey = Normalize(installDir);
+            var exes = new List<string> { games[0] };
+            string mainKey = Normalize(Path.GetFileNameWithoutExtension(games[0]));
+            foreach (string p in games.Skip(1))
+            {
+                string file = Path.GetFileNameWithoutExtension(p);
+                if (exes.Count < 3 && !NotAGameExeParts.Any(file.ToLowerInvariant().Contains) &&
+                    BelongsToGame(Normalize(file), mainKey, nameKey, dirKey, looseStem: true)) exes.Add(p);
+            }
+
+            // Other exes of the game in its folder, read once for both checks
+            List<string>? folderExes = null;
+            List<string> FolderExes() => folderExes ??= ExesIn(folder);
+            AddShippingCounterpart(exes, folder);
+            AddUnrealShipping(exes, FolderExes);
+            AddSiblingExes(exes, FolderExes, nameKey, dirKey);
+
+            // Only a settings tool in the launch options: the game exe found next to it comes first, and the tool is dropped
+            MoveGameFirst(exes);
+            if (!IsToolLike(exes[0])) exes.RemoveAll(IsToolLike);
+            return exes;
+        }
+
+        private static bool IsToolLike(string exe) => NotAGameExeParts.Any(Path.GetFileNameWithoutExtension(exe).ToLowerInvariant().Contains);
+
+        /// <summary>Moves the first exe that is not named like a tool (config, settings, editor, …) to the front.</summary>
+        private static void MoveGameFirst(List<string> exes)
+        {
+            int game = exes.FindIndex(p => !IsToolLike(p));
+            if (game <= 0) return;
+            string first = exes[game];
+            exes.RemoveAt(game);
+            exes.Insert(0, first);
+        }
+
+        /// <summary>Every exe in a game folder and its subfolders (4 levels), or none when the folder cannot be read.</summary>
+        private static List<string> ExesIn(string folder)
+        {
+            try
+            {
+                var options = new EnumerationOptions { RecurseSubdirectories = true, MaxRecursionDepth = 4, IgnoreInaccessible = true };
+                return Directory.EnumerateFiles(folder, "*.exe", options).ToList();
+            }
+            catch
+            {
+                return new List<string>();
+            }
+        }
+
+        /// <summary>
+        /// Unreal games whose starter has another name than the real process ("TheOuterWorlds.exe" starts
+        /// "Indiana-Win64-Shipping.exe"): when the main exe is a small starter and no shipping exe is watched yet, the
+        /// largest *-Win64-Shipping / *-WinGDK-Shipping exe in the folder is added.
+        /// </summary>
+        private static void AddUnrealShipping(List<string> exes, Func<List<string>> folderExes)
+        {
+            try
+            {
+                if (exes.Any(e => Path.GetFileNameWithoutExtension(e).EndsWith("-Shipping", StringComparison.OrdinalIgnoreCase))) return;
+                if (new FileInfo(exes[0]).Length > 5 * 1024 * 1024) return;   // a real game exe, not a starter
+
+                string? shipping = folderExes()
+                    .Where(e => Path.GetFileNameWithoutExtension(e).EndsWith("-Win64-Shipping", StringComparison.OrdinalIgnoreCase) ||
+                                Path.GetFileNameWithoutExtension(e).EndsWith("-WinGDK-Shipping", StringComparison.OrdinalIgnoreCase))
+                    .Where(e => !IsExcludedExe(Path.GetFileNameWithoutExtension(e)))
+                    .OrderByDescending(e => new FileInfo(e).Length)
+                    .FirstOrDefault();
+                if (shipping != null && exes.Count < 4) exes.Add(shipping);
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Other exes of the same game next to the one from the launch options, e.g. the multiplayer exe "AC4BFMP.exe"
+        /// next to "AC4BFSP.exe": same rules as the extra exes of <see cref="FindGameExecutables"/> (named like the game
+        /// or like the main exe), at most 3 names in total.
+        /// </summary>
+        private static void AddSiblingExes(List<string> exes, Func<List<string>> folderExes, string nameKey, string dirKey)
+        {
+            try
+            {
+                var names = new HashSet<string>(exes.Select(Path.GetFileNameWithoutExtension)!, StringComparer.OrdinalIgnoreCase);
+                if (names.Count >= 3) return;
+                string mainKey = Normalize(Path.GetFileNameWithoutExtension(exes[0]));
+                foreach (string exe in folderExes())
+                {
+                    string file = Path.GetFileNameWithoutExtension(exe);
+                    string lower = file.ToLowerInvariant();
+                    if (names.Contains(file) || IsExcludedExe(file) || LooksLikeLauncher(exe) || NotAGameExeParts.Any(lower.Contains)) continue;
+                    if (!BelongsToGame(Normalize(file), mainKey, nameKey, dirKey, requireStem: true)) continue;
+                    if (new FileInfo(exe).Length < 300 * 1024) continue;
+                    exes.Add(exe);
+                    names.Add(file);
+                    if (names.Count >= 3) break;
+                }
+            }
+            catch { }
+        }
+
+        // What follows the shared start of a tool's name and the game's name
+        private static readonly HashSet<string> ToolEndings = new(StringComparer.Ordinal)
+        {
+            "ds", "sc", "mod", "dev", "server", "editor", "console", "config", "tool", "tools", "debug"
+        };
+
+        /// <summary>
+        /// True when an exe (normalized name <paramref name="key"/>) belongs to the same game as the main exe: named like
+        /// the game or its folder, or starting like the main exe ("Game_DX12" next to "Game"). With
+        /// <paramref name="requireStem"/>, only the main-exe rule counts. With <paramref name="looseStem"/>, sharing the
+        /// first half of the name is enough ("iw3mp" / "iw3sp", "CivilizationBE_Mantle" / "CivilizationBE_DX11").
+        /// </summary>
+        private static bool BelongsToGame(string key, string mainKey, string nameKey, string dirKey, bool requireStem = false, bool looseStem = false)
+        {
+            bool namedLikeGame = key.Length >= 3 && (key == nameKey || key == dirKey || nameKey.Contains(key) || dirKey.Contains(key));
+            int shorter = Math.Min(key.Length, mainKey.Length), common = CommonPrefixLength(key, mainKey);
+            bool sameStem = key.Length >= 4 && mainKey.Length >= 4 && (key.StartsWith(mainKey) || mainKey.StartsWith(key) ||
+                            common >= Math.Max(4, shorter - 2));
+            if (looseStem) sameStem |= (common >= 3 && common * 2 >= shorter) || (key.Length >= 2 && mainKey.StartsWith(key));   // "tf" / "tf_win64"
+            // The main name plus a tool ending: "ContagionDS" (dedicated server), "PlagueIncSC" (scenario creator)
+            if (sameStem && ToolEndings.Contains(key.Substring(common))) return false;
+            return sameStem || (!requireStem && namedLikeGame);
         }
 
         private static string AcfValue(string text, string key)
@@ -858,13 +1040,22 @@ namespace SmartHdrManager
         // ------------------------------------------------------------------
         // Helpers
         // ------------------------------------------------------------------
+        /// <summary>
+        /// True when this game was detected before and its main exe still exists, so the cached entry can be reused.
+        /// Entries found by an older version are detected once more.
+        /// </summary>
+        private static bool CanReuse(string id)
+        {
+            var prev = _previous;
+            return prev != null && prev.TryGetValue(id, out var old) && old.Processes.Count > 0 && !string.IsNullOrEmpty(old.ExePath) &&
+                   File.Exists(old.ExePath) && old.ScanVersion >= CurrentScanVersion;
+        }
+
         private static bool TryReuse(string id, string name, string source, out LibraryGame game)
         {
             game = null!;
-            var prev = _previous;
-            if (prev == null || !prev.TryGetValue(id, out var old) || old.Processes.Count == 0) return false;
-            if (string.IsNullOrEmpty(old.ExePath) || !File.Exists(old.ExePath)) return false;
-            if (old.ScanVersion < CurrentScanVersion) return false;   // found by an older version: detect once more
+            if (!CanReuse(id)) return false;
+            var old = _previous![id];
 
             game = new LibraryGame
             {
