@@ -55,7 +55,7 @@ namespace SmartHdrManager
         private static readonly HashSet<string> KnownLaunchers = new(StringComparer.OrdinalIgnoreCase)
         {
             "redprelauncher", "redlauncher", "gtavlauncher", "playgtav", "playrdr2", "rdr2launcher", "launcher",
-            "startprotectedgame", "launcherpatcher", "gamelauncher", "bootstrapper"
+            "startprotectedgame", "launcherpatcher", "gamelauncher", "bootstrapper", "dowser", "playlan", "ffxivboot", "ffxivboot64", "edlaunch", "runme"
         };
 
         // Extra executables of the same game (2.5.2): never added just because they score close to the main exe
@@ -1185,13 +1185,16 @@ namespace SmartHdrManager
         }
 
         /// <summary>
-        /// True for programs that only start the real game: names containing "launcher" and a few known stubs
-        /// (REDprelauncher, PlayGTAV, start_protected_game, …).
+        /// True for programs that only start the real game: names containing "launcher", a few known stubs
+        /// (REDprelauncher, PlayGTAV, start_protected_game, Paradox's dowser, …) and exes in a launcher folder.
         /// </summary>
         public static bool LooksLikeLauncher(string exePathOrName)
         {
             string key = Normalize(Path.GetFileNameWithoutExtension(exePathOrName));
-            return key.Contains("launcher") || KnownLaunchers.Contains(key);
+            if (key.Contains("launcher") || KnownLaunchers.Contains(key)) return true;
+            // An exe in a launcher folder ("Launcher\eg2.exe", "ParadoxLauncher\dowser.exe")
+            string? dir = Path.GetDirectoryName(exePathOrName);
+            return !string.IsNullOrEmpty(dir) && Normalize(Path.GetFileName(dir)).Contains("launcher");
         }
 
         /// <summary>

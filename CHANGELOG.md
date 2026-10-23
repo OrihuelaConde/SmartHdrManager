@@ -15,6 +15,9 @@
 - **Steam games: the exe Steam really starts.** The app reads the game's launch options from Steam's local app cache (`appcache\appinfo.vdf`) instead of guessing the exe from file names and sizes. Launchers in the launch options are skipped as before, and so are the editors, tools and comics that some games also ship. Software, videos and soundtracks that Steam installs like games (a budget app, a trailer) are no longer listed. If the cache cannot be read, the old search is used. Library games are detected once more after the update; your HDR choices are kept.
 - **Programs that only share a game's exe name no longer switch HDR.** For a game from a launcher library, a process with the same name that runs from outside the game's install folder (two unrelated `game.exe`, a tool called like a game) is ignored, and the log says so. Folder links and junctions are followed. Process names that no library game uses, games whose location is unknown and processes whose path cannot be read are matched by name as before.
 
+### Fixed
+- **More launchers are recognised:** Paradox's launcher (`dowser.exe`), PlayLAN, Thief: Deadly Shadows' `runme.exe`, the FINAL FANTASY XIV and Elite Dangerous launchers and programs in a `Launcher` folder are treated as launchers, so the app watches the game they start.
+
 ## 2.6.1 – 2026-10
 
 ### Fixed
