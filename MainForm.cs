@@ -295,7 +295,7 @@ namespace SmartHdrManager
             // HDR games list (PCGamingWiki): which of your games support HDR, all in one place
             var hdrListLink = new Label
             {
-                Text = "HDR games…", Font = Theme.Small, ForeColor = Theme.Accent, AutoSize = true, Dock = DockStyle.Fill,
+                Text = "Check HDR support", Font = Theme.Small, ForeColor = Theme.Accent, AutoSize = true, Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleRight, Margin = new Padding(12, 0, 0, 0), Cursor = Cursors.Hand
             };
             hdrListLink.MouseEnter += (_, _) => hdrListLink.ForeColor = Theme.AccentHover;
@@ -1213,7 +1213,7 @@ namespace SmartHdrManager
             return true;
         }
 
-        /// <summary>Games › HDR games…: asks once to turn the list on, then shows the games on this PC that support HDR.</summary>
+        /// <summary>Games › Check HDR support: asks once to turn the list on, then shows the games on this PC that support HDR.</summary>
         private async Task OnShowHdrListAsync()
         {
             if (!_engine.Read(c => c.UseHdrDatabase) || _engine.HdrList == null)

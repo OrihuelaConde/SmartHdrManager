@@ -794,10 +794,10 @@ namespace SmartHdrManager
                 LibraryChanged?.Invoke(this, EventArgs.Empty);
                 if (newWithHdr.Count > 0)
                 {
-                    Log("HDRLIST", $"New game(s) that support HDR: {string.Join(", ", newWithHdr)} – turn them on in Games › HDR games.");
+                    Log("HDRLIST", $"New game(s) that support HDR: {string.Join(", ", newWithHdr)} – turn them on in Games › Check HDR support.");
                     _notifications.Enqueue(newWithHdr.Count == 1
-                        ? ($"{newWithHdr[0]} supports HDR", "Turn HDR on for it in the Games tab › HDR games.")
-                        : ($"{newWithHdr.Count} new games support HDR", "Turn HDR on for them in the Games tab › HDR games."));
+                        ? ($"{newWithHdr[0]} supports HDR", "Turn HDR on for it in the Games tab › Check HDR support.")
+                        : ($"{newWithHdr.Count} new games support HDR", "Turn HDR on for them in the Games tab › Check HDR support."));
                 }
             }
             catch (Exception ex)
