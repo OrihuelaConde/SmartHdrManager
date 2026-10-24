@@ -1,0 +1,28 @@
+name: HDR list debug (temporary)
+on:
+  push:
+    branches: [claude/hdr-debug-tmp]
+permissions:
+  contents: read
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - shell: pwsh
+        run: |
+          $api = 'https://www.pcgamingwiki.com/w/api.php'
+          $ua = 'SmartHdrManager-HdrList/1 (+https://github.com/VantaCode420/SmartHdrManager)'
+          function Q($text) {
+            $body = 'action=parse&format=json&formatversion=2&contentmodel=wikitext&prop=text&disablelimitreport=1&text=' + [uri]::EscapeDataString($text)
+            $r = Invoke-RestMethod -Uri $api -Method Post -Body $body -ContentType 'application/x-www-form-urlencoded' -UserAgent $ua
+            ($r.parse.text -replace '<[^>]+>', ' ' -replace '\s+', ' ').Trim()
+          }
+          Write-Host '--- Cyberpunk pages'
+          Write-Host (Q "{{#cargo_query:tables=Game,Video|join on=Game._pageID=Video._pageID|fields=Game._pageName=Page,Game.Steam_AppID=Steam,Game.GOGcom_ID=GOG,Video.HDR=HDR|where=Game._pageName LIKE 'Cyberpunk%'|format=table}}")
+          Write-Host '--- Video.HDR values'
+          Write-Host (Q "{{#cargo_query:tables=Video|fields=Video.HDR=HDR,COUNT(*)=N|group by=Video.HDR|format=table}}")
+          Write-Host '--- known HDR games'
+          Write-Host (Q "{{#cargo_query:tables=Game,Video|join on=Game._pageID=Video._pageID|fields=Game._pageName=Page,Video.HDR=HDR|where=Game._pageName IN ('Forza Horizon 5','Elden Ring','Red Dead Redemption 2','Hitman 3','Doom Eternal','Assassin''s Creed Valhalla','Horizon Zero Dawn','Alan Wake 2','God of War')|format=table}}")
+          ./hdr-database.ps1 -Output hdr-games.json
+          Select-String -Path hdr-games.json -Pattern 'Cyberpunk' -SimpleMatch | ForEach-Object { 'found Cyberpunk in json' }
